@@ -1,0 +1,13 @@
+# runtime state
+.piso/
+*.log
+
+# build artifacts
+bin/
+dist/
+
+# local env
+.env
+
+# Go
+*.test
