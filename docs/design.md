@@ -36,7 +36,7 @@ WORKER  piso-worker-<proj>  — pi on Bun
   └─ /piso-ca.pem ← gateway CA (ro) so Bun/curl trust the MITM cert
 ```
 
-Docker network `piso_vpc` has **ip masquerade disabled** (`com.docker.network.bridge.enable_ip_masquerade: "false"`). The worker has no NAT path to the internet; its *only* egress is the gateway. This one flag is the enforcement point — without it the whole design is advisory.
+Docker network `piso_vpc` is **`internal: true`**. Docker drops traffic forwarded off that bridge, so the worker has no path to the internet, LAN, or IMDS except the gateway (which is also on `piso_egress`, a normal NAT network). Masquerade is also disabled as belt-and-suspenders. This flag is the enforcement point — without it the whole design is advisory. Compose will not flip `Internal` on an already-created network; `piso up` tears down a leaky `piso_vpc` and recreates it.
 
 Worker hardening: `cap_drop: [ALL]`, `no-new-privileges`, `--init`, read-only rootfs, `/tmp`+`/run`+`/root/.cache` as tmpfs, no docker.sock, no host `~/.ssh` or `~/.pi/agent` (bare named volume).
 
@@ -77,5 +77,6 @@ cli/     Go CLI: piso (up/down/attach/status/secrets/expose/logs/dashboard)
 gateway/ Go MITM proxy + control plane + web UI (embedded)
 worker/  Docker image: node + pi, CA trust baked, hardening in compose
 compose/ gateway.yaml (shared) + worker.yaml.tmpl (per-project render)
-scripts/ smoke.sh: end-to-end verify of substitute/block/retry/ingress
+scripts/ smoke.sh: end-to-end verify of substitute/block/retry/ingress (no Docker)
+         isolation.sh: worker noproxy must fail; proxy and gateway egress must work
 ```
