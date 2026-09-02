@@ -55,7 +55,7 @@ Blocked requests return **407** to the worker with only `X-Piso-Request-Id` + `X
 ## Secrets policy
 
 - Only `piso_...` placeholders ever exist in the worker.
-- Real values live in the gateway's `.piso/state.json` (host-mounted, gateway-only, mode 0600) and in gateway memory.
+- Real values live in `~/.piso/state.json` (host-mounted into the gateway only, mode 0700 dir / 0600 file) and in gateway memory. Override with `PISO_DATA`.
 - Substitution happens at the last hop, inside the gateway, before upstream TLS.
 - The request log stores **placeholder names and redacted samples only** — never real values.
 - Patterns (the "looks like a credential" library) ship with ~30 defaults and are user-extendable via the UI; a new pattern is compiled in live.
