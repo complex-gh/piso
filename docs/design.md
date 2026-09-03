@@ -22,11 +22,11 @@ defense against a compromised host; DoS.
 
 ```
 host (you)
-  │  piso CLI  ·  browser dashboard (127.0.0.1:8081)  ·  ingress (piso.local)
+  │  piso CLI  ·  browser dashboard (http://piso.local)  ·  ingress (*.piso.local)
   ▼
 GATEWAY  piso-gateway (sole egress)
   ├─ :8080  egress MITM proxy   (CONNECT → TLS terminate → scan → decide)
-  ├─ :8081  control plane       (web UI, secrets/rules/patterns API, SSE log, retry)
+  ├─ :8081  control plane       (web UI at http://piso.local; host port settable via --ctrl-port)
   └─ :8082  ingress reverse proxy (name.piso.local → worker:port)
   │
   ▼
