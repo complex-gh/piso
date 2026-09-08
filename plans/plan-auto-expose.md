@@ -271,6 +271,14 @@ ALWAYS the dashboard unless an explicit ?route= is present; an explicit
 the apex. No cookie is read for dispatch on the apex; the legacy 8082
 listener still honors a cookie (backward compat).
 
+Follow-up (routes UX): URL/open use the canonical portless subdomain
+(http://<name>.piso.local). The kill button is replaced by an on/off toggle
+(RouteRec.Disabled + POST /api/v1/routes/{id}/disabled): off blocks proxying
+(403) while keeping the row re-enableable. Auto-disappearance: the routes
+ table polls every 5s (ensureRoutesPoll) so a stale auto route vanishes the
+moment the gateway sweeps it (after the 10-min grace), with the live/down
+badge flipping after 45s of no heartbeat.
+
 Verification requires the host (no Go toolchain or Docker in the workspace
 container): `go test ./...`, `sudo make install`, two `piso up` workers,
 `piso sync --watch`, and curl checks per the checklist below. In-container I
