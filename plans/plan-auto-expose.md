@@ -262,6 +262,13 @@ Contribution history: (1) auto-expose steps 1–8 + tests; (2) global hosts-sync
 daemon lifecycle (launchd/nohup, piso up convergence, make install/uninstall);
 (3) -1 the redirect; (4) fixed stdlib field-vs-method bug (r.RequestURI).
 
+Follow-up (package-only updates): fixed `piso update` bailing early with
+"already on pi X" and never rolling refreshed extension packages to workers
+when the pi pin was already current. Now cmdUpdate hashes the package set
+(stagedPackagesHash) before/after updateHostExtensions and proceeds to
+re-stage + rebuild (+ confirm/dry-run text) via updateDecision() when the
+packages changed even with old == version. Pure decision extracted for tests.
+
 Regression found & fixed (stale-cookie 404): with the merged web port, a
 `piso_route` cookie set by the OLD apex-?route flow could hijack plain
 `piso.local` into the ingress (stale label → 404 dashboard). Fix: the apex is
