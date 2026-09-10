@@ -12,3 +12,5 @@ dist/
 
 # Go
 *.test
+# local toolchain (downloaded inside the worker container)
+.tools/

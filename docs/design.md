@@ -59,6 +59,8 @@ Blocked requests return **407** to the worker with only `X-Piso-Request-Id` + `X
 - Substitution happens at the last hop, inside the gateway, before upstream TLS.
 - The request log stores **placeholder names and redacted samples only** — never real values.
 - Patterns (the "looks like a credential" library) ship with ~30 defaults and are user-extendable via the UI; a new pattern is compiled in live.
+- Each worker's env file `workers/<slug>/placeholders.env` is bind-mounted by **directory** (`workers/<slug>:/etc/piso:ro`), so the gateway's atomic tmp+rename rewrites become visible to new `piso attach` sessions without a container restart. A file-level mount would pin the pre-rewrite inode and the file would look deleted in running workers.
+- A secret with a blank `envKey` gets one **derived from its name** (uppercase, non-`[A-Z0-9_]` → `_`, leading digit prefixed with `_`); secrets are exported to an env file only when they have a non-empty `envKey`. `PUT /api/v1/secrets/{id}` edits a secret (blank `value` keeps the stored real value); the placeholder and worker scoping are immutable after creation because substitution rules reference them.
 
 ## The "block → fix → retry" loop
 
