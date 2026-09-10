@@ -70,6 +70,8 @@ Blocked requests return **407** to the worker with only `X-Piso-Request-Id` + `X
 
 `piso expose 5173 --name preview` → `POST /api/v1/routes` → gateway reverse-proxies `https://preview.piso.local` → `worker:5173` (websocket-capable, `FlushInterval=-1` for SSE). Host browser trusts the gateway CA (install `.piso/ca.crt`) → TLS green.
 
+Plan review (`plan-<slug>.piso.local`) is the same ingress hop. Plannotator binds **127.0.0.1:19432** inside the worker; the gateway dials the vpc address, so `planning-watch.sh` runs `piso-loopback-forward` (vpc_ip:19432 → 127.0.0.1:19432) while the port is up. Do not bind Plannotator on 0.0.0.0. Unrelated loopback listeners are not forwarded.
+
 ## Files
 
 ```
