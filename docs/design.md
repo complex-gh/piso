@@ -61,12 +61,13 @@ Blocked requests return **407** to the worker with only `X-Piso-Request-Id` + `X
 - Patterns (the "looks like a credential" library) ship with ~30 defaults and are user-extendable via the UI; a new pattern is compiled in live.
 - Each worker's env file `workers/<slug>/placeholders.env` is bind-mounted by **directory** (`workers/<slug>:/etc/piso:ro`), so the gateway's atomic tmp+rename rewrites become visible to new `piso attach` sessions without a container restart. A file-level mount would pin the pre-rewrite inode and the file would look deleted in running workers.
 - A secret with a blank `envKey` gets one **derived from its name** (uppercase, non-`[A-Z0-9_]` → `_`, leading digit prefixed with `_`); secrets are exported to an env file only when they have a non-empty `envKey`. `PUT /api/v1/secrets/{id}` edits a secret (blank `value` keeps the stored real value); the placeholder and worker scoping are immutable after creation because substitution rules reference them.
+- Creating or editing a secret via `POST`/`PUT /api/v1/secrets` **seeds substitution rules from `allowedHosts`**: one rule per host, or a single `*` rule when the list is empty/absent (all hosts). Rules for other placeholders are untouched. Matching retryable blocked captures are then replayed automatically (same as resolve-failures), so adding a secret unblocks stuck requests without a separate rule step or a manual retry.
 
 ## The "block → fix → retry" loop
 
 1. Worker request carries `piso_xyz` with no rule → 407 + captured request + log row `retryable`.
-2. User adds the secret + rule (UI or `piso secrets add` + rule).
-3. Click **retry** (or `POST /api/v1/requests/:id/retry`) → the gateway re-runs the **full policy fresh** on the captured request (a stale verdict is never trusted), substitutes if now allowed, forwards.
+2. User adds the secret (UI or `piso secrets add`). Rules are seeded from `allowedHosts` and matching captures are replayed automatically.
+3. If a capture is still blocked (or the secret already existed), click **retry** (or `POST /api/v1/requests/:id/retry`) → the gateway re-runs the **full policy fresh** on the captured request (a stale verdict is never trusted), substitutes if now allowed, forwards.
 
 ## Ingress (dev servers in the worker)
 
