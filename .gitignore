@@ -14,3 +14,7 @@ dist/
 *.test
 # local toolchain (downloaded inside the worker container)
 .tools/
+
+# worker-local build/cache dirs (not part of the repo)
+.gobuild/
+.home/

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"piso/gateway/internal/proxy"
@@ -44,19 +45,34 @@ func remoteIP(r *http.Request) string {
 	return host
 }
 
+// envBool reads a boolean env var; anything except 1/true/on/yes (folded) is
+// false, so an unset or empty value falls back to def.
+func envBool(name string, def bool) bool {
+	v, ok := os.LookupEnv(name)
+	if !ok || v == "" {
+		return def
+	}
+	l := strings.ToLower(v)
+	if l == "1" || l == "true" || l == "on" || l == "yes" {
+		return true
+	}
+	return false
+}
+
 func main() {
 	var (
-		statePath    = flag.String("state", envOr("PISO_STATE_FILE", ".piso/state.json"), "state file (secrets/rules/domains/exceptions/routes)")
-		patternsPath = flag.String("patterns", envOr("PISO_PATTERNS_FILE", ".piso/patterns.json"), "credential pattern library file")
-		logPath      = flag.String("log", envOr("PISO_LOG_FILE", ".piso/requests.jsonl"), "request log (JSONL)")
+		statePath      = flag.String("state", envOr("PISO_STATE_FILE", ".piso/state.json"), "state file (secrets/rules/domains/exceptions/routes)")
+		patternsPath   = flag.String("patterns", envOr("PISO_PATTERNS_FILE", ".piso/patterns.json"), "credential pattern library file")
+		logPath        = flag.String("log", envOr("PISO_LOG_FILE", ".piso/requests.jsonl"), "request log (JSONL)")
 		activitiesPath = flag.String("activities", envOr("PISO_ACTIVITIES_FILE", ".piso/activities.db"), "activity database (SQLite)")
-		caCertPath   = flag.String("ca-cert", envOr("PISO_CA_CERT", ".piso/ca.crt"), "CA certificate (generated if missing)")
-		caKeyPath    = flag.String("ca-key", envOr("PISO_CA_KEY", ".piso/ca.key"), "CA private key (generated if missing)")
-		proxyAddr    = flag.String("proxy-listen", envOr("PISO_PROXY_LISTEN", ":8080"), "egress proxy listen addr")
-		ctrlAddr     = flag.String("ctrl-listen", envOr("PISO_CTRL_LISTEN", ":8081"), "control plane (UI+API) listen addr")
-		workerAddr   = flag.String("worker-listen", envOr("PISO_WORKER_LISTEN", ":8083"), "worker API listen addr (vpc only)")
-		ingressAddr  = flag.String("ingress-listen", envOr("PISO_INGRESS_LISTEN", ":8082"), "ingress reverse proxy listen addr")
-		maxLog       = flag.Int("max-log", 5000, "max in-memory log records")
+		caCertPath     = flag.String("ca-cert", envOr("PISO_CA_CERT", ".piso/ca.crt"), "CA certificate (generated if missing)")
+		caKeyPath      = flag.String("ca-key", envOr("PISO_CA_KEY", ".piso/ca.key"), "CA private key (generated if missing)")
+		proxyAddr      = flag.String("proxy-listen", envOr("PISO_PROXY_LISTEN", ":8080"), "egress proxy listen addr")
+		ctrlAddr       = flag.String("ctrl-listen", envOr("PISO_CTRL_LISTEN", ":8081"), "control plane (UI+API) listen addr")
+		workerAddr     = flag.String("worker-listen", envOr("PISO_WORKER_LISTEN", ":8083"), "worker API listen addr (vpc only)")
+		ingressAddr    = flag.String("ingress-listen", envOr("PISO_INGRESS_LISTEN", ":8082"), "ingress reverse proxy listen addr")
+		maxLog         = flag.Int("max-log", 5000, "max in-memory log records")
+		passthrough    = flag.Bool("passthrough-unrouted", envBool("PISO_PASSTHROUGH_UNROUTED", false), "splice CONNECTs for hosts without rules (CCT-style transparent proxy)")
 	)
 	flag.Parse()
 
@@ -79,7 +95,7 @@ func main() {
 		log.Fatalf("ca: %v", err)
 	}
 
-	h := proxy.New(ca, st, pat, workerIdentityFn(st))
+	h := proxy.New(ca, st, pat, workerIdentityFn(st), *passthrough)
 	srv := server.New(st, pat, h, ca)
 
 	// WebHandler is the single host web entrypoint (dashboard + ingress on the

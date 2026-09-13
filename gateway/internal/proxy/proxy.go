@@ -17,7 +17,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +51,11 @@ type Handler struct {
 	Patterns *patterns.Compiled
 	Store    *store.Store
 	Worker   func(*http.Request) string // request -> worker identity
+	// PassthroughUnrouted enables CCT-style transparency: CONNECTs to hosts
+	// that no rule/domain/exception touches are spliced as raw TCP (no TLS
+	// termination, no inspection), so those clients need no CA trust and see
+	// a normal forward proxy. Hosts with any policy stay MITM'd + guarded.
+	PassthroughUnrouted bool
 
 	client *http.Client
 }
@@ -56,7 +63,7 @@ type Handler struct {
 // New builds the handler with a forwarding client that never follows
 // redirects automatically: redirects are returned to the client so the next
 // hop is re-scanned and re-policed by the gateway.
-func New(ca *CA, st *store.Store, pat *patterns.Compiled, workerFn func(*http.Request) string) *Handler {
+func New(ca *CA, st *store.Store, pat *patterns.Compiled, workerFn func(*http.Request) string, passthroughUnrouted bool) *Handler {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	// Never inherit HTTP_PROXY: the gateway is the proxy. DisableCompression
 	// keeps upstream Content-Encoding intact so we do not rewrite lengths.
@@ -67,10 +74,11 @@ func New(ca *CA, st *store.Store, pat *patterns.Compiled, workerFn func(*http.Re
 	tr.DisableCompression = true
 	tr.ResponseHeaderTimeout = headerTimeout
 	return &Handler{
-		CA:       ca,
-		Store:    st,
-		Patterns: pat,
-		Worker:   workerFn,
+		CA:                  ca,
+		Store:               st,
+		Patterns:            pat,
+		Worker:              workerFn,
+		PassthroughUnrouted: passthroughUnrouted,
 		client: &http.Client{
 			Transport: tr,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -95,10 +103,16 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if !strings.Contains(target, ":") {
 		target += ":443"
 	}
-	host, _, err := net.SplitHostPort(target)
+	host, portS, err := net.SplitHostPort(target)
 	if err != nil {
 		http.Error(w, "bad CONNECT target", http.StatusBadRequest)
 		return
+	}
+	port := 443
+	if portS != "" {
+		if v, perr := strconv.Atoi(portS); perr == nil && v > 0 && v <= 65535 {
+			port = v
+		}
 	}
 	// Hard network-level block on internal targets (belt & braces with policy).
 	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
@@ -137,6 +151,15 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal target denied", http.StatusForbidden)
 			return
 		}
+	}
+
+	// CCT-style transparency: a host that no rule, domain policy, or
+	// exception references is spliced as a raw byte tunnel instead of being
+	// MITM'd. The client keeps real end-to-end TLS with the origin, needs no
+	// gateway CA, and the gateway stays invisible to that connection.
+	if h.PassthroughUnrouted && !h.hostNeedsInterception(host) {
+		h.handlePassthrough(w, r, host, port, addrs)
+		return
 	}
 
 	// Claim the tunnel.
@@ -209,6 +232,101 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// hostNeedsInterception reports whether any configured rule, domain policy,
+// or enabled exception references host. Only such hosts are MITM'd; every
+// other host may be spliced transparently when PassthroughUnrouted is set.
+func (h *Handler) hostNeedsInterception(host string) bool {
+	for _, r := range recRules(h.Store) {
+		if r.Host == "*" || strings.EqualFold(r.Host, host) {
+			return true
+		}
+	}
+	if _, ok := recDomains(h.Store)[strings.ToLower(host)]; ok {
+		return true
+	}
+	for _, e := range recExceptions(h.Store) {
+		if !e.Enabled {
+			continue
+		}
+		if e.HostRegex == "" {
+			return true // host-wide exception: applies to every host
+		}
+		re, err := regexp.Compile(e.HostRegex)
+		if err != nil {
+			continue
+		}
+		if re.MatchString(host) {
+			return true
+		}
+	}
+	return false
+}
+
+// handlePassthrough answers the CONNECT with 200 and bridges the raw TCP
+// stream to the origin — no TLS termination, no scanning, no CA. Either leg
+// ending tears down both; this returns once the splice finishes.
+func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, host string, port int, addrs []net.IPAddr) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+		return
+	}
+	conn, brw, err := hj.Hijack()
+	if err != nil {
+		log.Printf("proxy: passthrough: hijack failed: %v", err)
+		return
+	}
+	defer conn.Close()
+	if _, err := brw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+	if err := brw.Flush(); err != nil {
+		return
+	}
+
+	// Dial the origin, reusing the already-verified (non-internal) addresses.
+	var up net.Conn
+	var dialErr error
+	for _, a := range addrs {
+		na, aok := netip.AddrFromSlice(a.IP)
+		if !aok {
+			continue
+		}
+		ap := netip.AddrPortFrom(na, uint16(port))
+		u, uerr := net.Dial("tcp", ap.String())
+		if uerr != nil {
+			dialErr = uerr
+			continue
+		}
+		up = u
+		dialErr = nil
+		break
+	}
+	if dialErr != nil {
+		log.Printf("proxy: passthrough: dial %s: %v", host, dialErr)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+	defer up.Close()
+
+	// Bidirectional splice. brw.Reader may already hold bytes the client
+	// sent before we hijacked (e.g. a TLS ClientHello), so the client leg
+	// must start from the buffered reader, never from the raw conn.
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.CopyBuffer(up, brw.Reader, make([]byte, 65536))
+		_ = up.Close()
+		close(done)
+	}()
+	go func() {
+		_, _ = io.CopyBuffer(conn, up, make([]byte, 65536))
+		_ = up.Close()
+		_ = conn.Close()
+		close(done)
+	}()
+	<-done
 }
 
 // hijackedConn reads leftover bytes from Hijack's bufio.Reader before the

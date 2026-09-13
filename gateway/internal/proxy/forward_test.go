@@ -20,7 +20,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestNewUsesHeaderTimeout(t *testing.T) {
-	h := New(nil, nil, nil, nil)
+	h := New(nil, nil, nil, nil, false)
 	tr, ok := h.client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("client transport is not *http.Transport")
