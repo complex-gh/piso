@@ -29,13 +29,14 @@ WORKER (pi, Bun)  ── named volume ~/.pi/agent (sessions persist)
 - **Everything is gated**: the worker's only egress is the gateway (`piso_vpc`
   is a Docker internal network — off-bridge forwarding is dropped), and its
   only ingress is the gateway's reverse proxy.
-- **Optional transparency** (`PISO_PASSTHROUGH_UNROUTED=true` on the gateway):
-  CONNECTs to hosts that no rule/domain/exception references are spliced as a
-  raw byte tunnel instead of being MITM'd — real end-to-end TLS, no CA needed
-  on the client, invisible proxy (CCT-style). Hosts with any policy stay fully
-  inspected, blocked, and logged. Default off; enabling it trades inspection
-  of unruled traffic for zero client friction, and pairs with host-side
-  default-route + iptables REDIRECT for fully transparent egress.
+- **Transparency by default** (since this branch): CONNECTs to hosts that no
+  rule/domain/exception references are spliced as a raw byte tunnel instead
+  of being MITM'd — real end-to-end TLS, no CA needed on the client,
+  invisible proxy (CCT-style). Hosts with any policy stay fully inspected,
+  blocked, and logged. Set `PISO_PASSTHROUGH_UNROUTED=false` to return to
+  always-MITM. Enabling it trades inspection of unruled traffic for zero
+  client friction, and pairs with host-side default-route + iptables REDIRECT
+  for fully transparent egress.
 
 ## Layout
 

@@ -72,7 +72,7 @@ func main() {
 		workerAddr     = flag.String("worker-listen", envOr("PISO_WORKER_LISTEN", ":8083"), "worker API listen addr (vpc only)")
 		ingressAddr    = flag.String("ingress-listen", envOr("PISO_INGRESS_LISTEN", ":8082"), "ingress reverse proxy listen addr")
 		maxLog         = flag.Int("max-log", 5000, "max in-memory log records")
-		passthrough    = flag.Bool("passthrough-unrouted", envBool("PISO_PASSTHROUGH_UNROUTED", false), "splice CONNECTs for hosts without rules (CCT-style transparent proxy)")
+		passthrough    = flag.Bool("passthrough-unrouted", envBool("PISO_PASSTHROUGH_UNROUTED", true), "splice CONNECTs for hosts without rules (CCT-style transparent proxy; default on)")
 	)
 	flag.Parse()
 
