@@ -30,6 +30,10 @@ services:
       - "[::1]:${PISO_CTRL_PORT:-80}:8081"
       - "127.0.0.1:${PISO_INGRESS_PORT:-8082}:8082"
       - "[::1]:${PISO_INGRESS_PORT:-8082}:8082"
+      # Transparent interception (CCT-style): the host DNATs RULED hosts'
+      # :443 to this port; the gateway sniffs SNI and MITMs only ruled hosts.
+      - "127.0.0.1:${PISO_TRANSPARENT_PORT:-8084}:8084"
+      - "[::1]:${PISO_TRANSPARENT_PORT:-8084}:8084"
     volumes:
       # Machine-level state (secrets, CA, log). The CLI sets PISO_DATA
       # (default ~/.piso) so an installed binary does not need a writable repo.
@@ -45,6 +49,9 @@ services:
       PISO_CTRL_LISTEN: :8081
       PISO_WORKER_LISTEN: :8083
       PISO_INGRESS_LISTEN: :8082
+      # REDIRECT/DNAT target for transparent (SNI-based) interception. The
+      # host script scripts/transparent-egress.sh DNATs ruled hosts here.
+      PISO_TRANSPARENT_LISTEN: :8084
       # The public WEB port (same listener as the control plane — WebHandler
       # dispatches dashboard vs ingress by Host on one port), advertised on
       # /api/v1/health so URL generators are portless. Defaults to the control
@@ -103,10 +110,15 @@ networks:
   vpc:
     name: piso_vpc
     driver: bridge
-    internal: true
+    # CCT-style transparency: the worker bridge is allowed to NAT to the
+    # internet on its own (no proxy, no CA for unrouted hosts). This drops
+    # the old "gateway is the only egress" invariant — see
+    # docs/TRANSPARENT_EGRESS.md for the tradeoff and the DNAT interception
+    # of ruled hosts that keeps substitution working.
+    internal: false
     enable_ipv6: false
     driver_opts:
-      com.docker.network.bridge.enable_ip_masquerade: "false"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
   egress:
     name: piso_egress
     driver: bridge

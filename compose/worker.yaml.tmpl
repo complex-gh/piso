@@ -30,8 +30,11 @@ services:
       - CA_DIR/pi-profile/settings.json:/root/.pi/agent/settings.json:ro
       - CA_DIR/pi-profile/models.json:/root/.pi/agent/models.json:ro
     environment:
-      HTTPS_PROXY: http://gateway:8080
-      HTTP_PROXY: http://gateway:8080
+      # Transparent egress (CCT-style): the vpc bridge NATs unrouted hosts
+      # directly, and the host DNATs RULED hosts (:443) into the gateway's
+      # transparent listener for MITM/substitution. No HTTP(S)_PROXY needed —
+      # the worker's default route now leads straight to the internet.
+      # Keep /piso-ca.pem mounted so MITM'd (ruled) hosts still verify.
       NO_PROXY: gateway,localhost,127.0.0.1,*.piso.local
       GATEWAY_URL: http://gateway:8083
       PISO_WORKER_NAME: piso-worker-PROJ-SLUG

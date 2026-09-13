@@ -72,6 +72,7 @@ func main() {
 		workerAddr     = flag.String("worker-listen", envOr("PISO_WORKER_LISTEN", ":8083"), "worker API listen addr (vpc only)")
 		ingressAddr    = flag.String("ingress-listen", envOr("PISO_INGRESS_LISTEN", ":8082"), "ingress reverse proxy listen addr")
 		maxLog         = flag.Int("max-log", 5000, "max in-memory log records")
+		transparent    = flag.String("transparent-listen", envOr("PISO_TRANSPARENT_LISTEN", ""), "REDIRECT listener for transparent (SNI-based) interception")
 		passthrough    = flag.Bool("passthrough-unrouted", envBool("PISO_PASSTHROUGH_UNROUTED", true), "splice CONNECTs for hosts without rules (CCT-style transparent proxy; default on)")
 	)
 	flag.Parse()
@@ -96,6 +97,13 @@ func main() {
 	}
 
 	h := proxy.New(ca, st, pat, workerIdentityFn(st), *passthrough)
+	if *transparent != "" {
+		go func() {
+			if err := h.ServeTransparentLoop(*transparent); err != nil {
+				log.Printf("transparent listener: %v", err)
+			}
+		}()
+	}
 	srv := server.New(st, pat, h, ca)
 
 	// WebHandler is the single host web entrypoint (dashboard + ingress on the

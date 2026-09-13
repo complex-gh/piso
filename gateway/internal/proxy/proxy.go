@@ -181,16 +181,21 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err := brw.Flush(); err != nil {
 		return
 	}
+	h.serveMITM(conn, brw.Reader, host, r)
+}
 
+// serveMITM terminates TLS with a leaf for host and serves decrypted
+// HTTP/1.1 from the client over the tunnel, running the full scan/decision/
+// substitution pipeline per request. br must be a reader over the connection
+// that may already hold buffered ClientHello bytes.
+func (h *Handler) serveMITM(conn net.Conn, br *bufio.Reader, host string, r *http.Request) {
 	// Server-side TLS with a leaf signed for this hostname.
 	leaf, err := h.CA.Leaf(host)
 	if err != nil {
 		log.Printf("proxy: leaf for %s: %v", host, err)
 		return
 	}
-	// The HTTP server's bufio.Reader may already hold the TLS ClientHello.
-	// Handshake on the raw conn drops those bytes (bad record MAC / hang).
-	tlsConn := tls.Server(&hijackedConn{Conn: conn, br: brw.Reader}, &tls.Config{
+	tlsConn := tls.Server(&hijackedConn{Conn: conn, br: br}, &tls.Config{
 		Certificates: []tls.Certificate{leaf.toTLS()},
 		MinVersion:   tls.VersionTLS12,
 		NextProtos:   []string{"http/1.1"},
@@ -203,9 +208,9 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Serve decrypted HTTP/1.1 from the client over the tunnel.
 	// Do not use the CONNECT request context: it can be canceled after hijack.
-	br := bufio.NewReader(tlsConn)
+	brr := bufio.NewReader(tlsConn)
 	for {
-		req, err := http.ReadRequest(br)
+		req, err := http.ReadRequest(brr)
 		if err != nil {
 			return // EOF or client closed
 		}
@@ -285,7 +290,14 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, host
 	if err := brw.Flush(); err != nil {
 		return
 	}
+	h.splice(conn, brw.Reader, host, port, addrs)
+}
 
+// splice bridges br (the client side, which may already hold buffered bytes
+// such as a TLS ClientHello) to the origin at addrs:port as a raw byte
+// tunnel — no TLS termination, no scanning, no CA. Either leg ending tears
+// down both; this returns once the splice finishes.
+func (h *Handler) splice(conn net.Conn, br *bufio.Reader, host string, port int, addrs []net.IPAddr) {
 	// Dial the origin, reusing the already-verified (non-internal) addresses.
 	var up net.Conn
 	var dialErr error
@@ -305,18 +317,18 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, host
 		break
 	}
 	if dialErr != nil {
-		log.Printf("proxy: passthrough: dial %s: %v", host, dialErr)
-		http.Error(w, "bad gateway", http.StatusBadGateway)
+		log.Printf("proxy: splice: dial %s: %v", host, dialErr)
+		_ = conn.Close()
 		return
 	}
 	defer up.Close()
 
-	// Bidirectional splice. brw.Reader may already hold bytes the client
-	// sent before we hijacked (e.g. a TLS ClientHello), so the client leg
-	// must start from the buffered reader, never from the raw conn.
+	// Bidirectional splice. The client leg MUST start from the buffered
+	// reader (it may hold a ClientHello already read from conn), never the
+	// raw conn.
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.CopyBuffer(up, brw.Reader, make([]byte, 65536))
+		_, _ = io.CopyBuffer(up, br, make([]byte, 65536))
 		_ = up.Close()
 		close(done)
 	}()
@@ -327,6 +339,213 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, host
 		close(done)
 	}()
 	<-done
+}
+
+// resolveExternalHost resolves host and refuses internal/link-local targets
+// (metadata-style attacks). Returns the verified external addresses.
+func (h *Handler) resolveExternalHost(host string) ([]net.IPAddr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range addrs {
+		if a.IP.IsLoopback() || a.IP.IsPrivate() || a.IP.IsLinkLocalUnicast() || a.IP.IsUnspecified() {
+			return nil, fmt.Errorf("internal target denied: %s", host)
+		}
+	}
+	return addrs, nil
+}
+
+// handleTransparentConn handles one connection accepted on the REDIRECT
+// listener: sniff the TLS SNI, replay the buffered ClientHello, then apply
+// the same selective-interception decision as CONNECT (MITM when the host is
+// ruled, raw splice otherwise). No SO_ORIGINAL_DST needed — the gateway
+// dials the origin itself.
+func (h *Handler) handleTransparentConn(conn net.Conn, remote string) {
+	defer conn.Close()
+	sni, hello, err := readClientHelloSNI(conn)
+	if err != nil || sni == "" {
+		log.Printf("proxy: transparent: no SNI (%v)", err)
+		return
+	}
+	addrs, rerr := h.resolveExternalHost(sni)
+	if rerr != nil {
+		log.Printf("proxy: transparent: %v", rerr)
+		return
+	}
+	br := bufio.NewReader(&prependReader{Conn: conn, Prefix: hello})
+	r := &http.Request{RemoteAddr: remote}
+	if h.PassthroughUnrouted && !h.hostNeedsInterception(sni) {
+		h.splice(conn, br, sni, 443, addrs)
+		return
+	}
+	h.serveMITM(conn, br, sni, r)
+}
+
+// serveTransparentLoop accepts raw TLS connections on addr (the iptables
+// REDIRECT target) and dispatches each to handleTransparentConn.
+func (h *Handler) ServeTransparentLoop(addr string) error {
+	la, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return err
+	}
+	l, err := net.ListenTCP("tcp", la)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	log.Printf("proxy: transparent REDIRECT listener on %s", addr)
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return err
+		}
+		cc := c // explicit copy: the goroutine must not race the next Accept
+		go func() {
+			h.handleTransparentConn(cc, remoteOf(cc))
+		}()
+	}
+}
+
+// remoteOf renders a connection's peer as "ip:port" for worker-identity
+// lookup, mirroring how the HTTP server populates RemoteAddr.
+func remoteOf(c net.Conn) string {
+	return c.RemoteAddr().String()
+}
+
+// readFull blocks until n bytes are read from conn, or the connection
+// closes/errors.
+func readFull(conn net.Conn, n int) ([]byte, error) {
+	out := make([]byte, n)
+	got := 0
+	for got < n {
+		m, err := conn.Read(out[got:])
+		if err != nil {
+			return nil, err
+		}
+		if m == 0 {
+			return nil, fmt.Errorf("EOF reading TLS record")
+		}
+		got += m
+	}
+	return out, nil
+}
+
+// readClientHelloSNI reads the first TLS record, extracts the RFC 4366
+// server_name (SNI), and returns it with the FULL record bytes so callers
+// can replay them into the MITM or splice paths.
+func readClientHelloSNI(conn net.Conn) (string, []byte, error) {
+	hdr, err := readFull(conn, 5)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(hdr) != 5 || hdr[0] != 0x16 {
+		return "", nil, fmt.Errorf("not a TLS handshake record")
+	}
+	hlen := int(hdr[3])*256 + int(hdr[4])
+	if hlen <= 0 || hlen > 1<<14 {
+		return "", nil, fmt.Errorf("bad ClientHello length %d", hlen)
+	}
+	body, err := readFull(conn, hlen)
+	if err != nil {
+		return "", nil, err
+	}
+	sni, _ := parseClientHelloSNI(body)
+	hello := make([]byte, 5+hlen)
+	for i := 0; i < 5; i++ {
+		hello[i] = hdr[i]
+	}
+	for i := 0; i < hlen; i++ {
+		hello[5+i] = body[i]
+	}
+	return sni, hello, nil
+}
+
+// parseClientHelloSNI walks a ClientHello handshake body (after the 5-byte
+// record header) and returns the first server_name entry. ok=false when the
+// message is not a ClientHello or has no (parseable) SNI extension.
+func parseClientHelloSNI(b []byte) (string, bool) {
+	// handshake header: type(1) length(3) version(2) random(32)
+	if len(b) < 4+2+32+1 {
+		return "", false
+	}
+	if b[0] != 0x01 {
+		return "", false
+	}
+	i := 4 + 2 + 32 // skip type+len(4), version(2), random(32)
+	// session id
+	if 1 > len(b)-i || int(b[i]) > len(b)-i-1 {
+		return "", false
+	}
+	i += 1 + int(b[i])
+	// cipher suites: len(2) + list
+	if 2 > len(b)-i {
+		return "", false
+	}
+	clen := int(b[i])*256 + int(b[i+1])
+	i += 2 + clen
+	// compression: len(1) + list
+	if 1 > len(b)-i {
+		return "", false
+	}
+	i += 1 + int(b[i])
+	// extensions (optional)
+	if 2 > len(b)-i {
+		return "", false
+	}
+	exlen := int(b[i])*256 + int(b[i+1])
+	i += 2
+	if exlen > len(b)-i {
+		return "", false
+	}
+	end := i + exlen
+	for i+4 <= end {
+		etype := int(b[i])*256 + int(b[i+1])
+		eelen := int(b[i+2])*256 + int(b[i+3])
+		i += 4
+		if i+eelen > end {
+			return "", false
+		}
+		if etype == 0x0000 { // server_name
+			// list_len(2) then one or more (type(1) len(2) name)
+			j := i + 2
+			if j+3 > i+eelen || b[j] != 0x00 {
+				break
+			}
+			nlen := int(b[j+1])*256 + int(b[j+2])
+			if nlen == 0 || j+3+nlen > i+eelen {
+				break
+			}
+			return string(b[j+3 : j+3+nlen]), true
+		}
+		i += eelen
+	}
+	return "", false
+}
+
+// prependReader yields Prefix bytes first, then reads from Conn — used to
+// replay a buffered TLS ClientHello after the SNI was sniffed off the wire.
+type prependReader struct {
+	net.Conn
+	Prefix []byte
+	Off    int
+}
+
+func (c *prependReader) Read(p []byte) (int, error) {
+	if c.Off < len(c.Prefix) {
+		n := len(p)
+		if len(c.Prefix)-c.Off < n {
+			n = len(c.Prefix) - c.Off
+		}
+		for j := 0; j < n; j++ {
+			p[j] = c.Prefix[c.Off+j]
+		}
+		c.Off += n
+		return n, nil
+	}
+	return c.Conn.Read(p)
 }
 
 // hijackedConn reads leftover bytes from Hijack's bufio.Reader before the
