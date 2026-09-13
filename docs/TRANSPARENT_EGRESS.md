@@ -33,17 +33,17 @@ ClientHello's SNI and dials the origin itself.
 ## Deploy
 
 ```bash
-# 1. gateway code + compose (this branch)
-sudo make install                 # rebuilds gateway image incl. :8084 listener
-# 2. host NAT for the ruled hosts
-sudo PISO_TRANSPARENT_PORT=8084 ./scripts/transparent-egress.sh install
-# 3. workers now route directly; recreate them so the new env applies
+# 1. gateway code + compose + host DNAT (transparent-egress.sh runs
+#    automatically at the end of make install on iptables hosts)
+sudo make install
+# 2. workers now route directly; recreate them so the new env applies
 piso up
 ```
 
 Refresh ruled-host IPs whenever they change (github.com rotates):
-`sudo PISO_TRANSPARENT_PORT=8084 ./scripts/transparent-egress.sh refresh`
-(put it on a cron or call it from `piso up`).
+`sudo PISO_DATA=~/.piso ./scripts/transparent-egress.sh refresh` (put it on
+a cron or call it from `piso up`). Port customization: `piso up
+--transparent-port N` (persisted to ports.json and picked up by the script).
 
 ## Verification
 

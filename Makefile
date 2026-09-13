@@ -48,14 +48,29 @@ install: build
 	@echo "share     $(SHARE)"
 	@echo "data      $(REAL_HOME)/.piso"
 	$(MAKE) setup-install
+	$(MAKE) host-nat
 	@echo "restarting hosts sync daemon with the new binary"
 	PISO_DATA="$(REAL_HOME)/.piso" $(PREFIX)/bin/piso sync daemon-restart || \
 		echo "piso: warning: sync daemon did not verify up (see above); retry: sudo PISO_DATA=$(REAL_HOME)/.piso $(PREFIX)/bin/piso sync daemon-restart"
+
+# Apply the transparent-egress DNAT rules for ruled hosts (Linux + iptables
+# hosts only). Runs after setup-install so the gateway's :8084 listener exists.
+# Non-fatal: on macOS/no-iptables hosts make install must still succeed.
+host-nat:
+	@if command -v iptables >/dev/null 2>&1; then \
+		PISO_DATA="$(REAL_HOME)/.piso" scripts/transparent-egress.sh install \
+			|| echo "piso: warning: transparent DNAT rules not applied (see scripts/transparent-egress.sh)"; \
+	else \
+		echo "piso: no iptables on this host — transparent-egress DNAT skipped"; \
+	fi
 
 # Uninstall: stop the global hosts-sync daemon first, then remove binaries and
 # the share tree. User data (~/.piso: secrets, CA, state) is intentionally kept.
 uninstall:
 	@echo "stopping hosts sync daemon"
+	@if command -v iptables >/dev/null 2>&1; then \
+		PISO_DATA="$(REAL_HOME)/.piso" scripts/transparent-egress.sh uninstall || true; \
+	fi
 	-PISO_DATA="$(REAL_HOME)/.piso" $(PREFIX)/bin/piso sync daemon-uninstall || true
 	rm -f $(PREFIX)/bin/piso
 	rm -rf $(SHARE)

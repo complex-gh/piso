@@ -14,9 +14,10 @@ import (
 // http://piso.local (no port). In-container listen ports stay 8080/8081/8082
 // so the worker's HTTP_PROXY=gateway:8080 does not change.
 const (
-	DefaultProxyPort   = 8080
-	DefaultControlPort = 80
-	DefaultIngressPort = 8082
+	DefaultProxyPort       = 8080
+	DefaultControlPort     = 80
+	DefaultIngressPort     = 8082
+	DefaultTransparentPort = 8084
 )
 
 // DashboardHost is the browser hostname for the control-plane UI.
@@ -24,14 +25,15 @@ const DashboardHost = "piso.local"
 
 // HostPorts are the localhost publish ports for the gateway.
 type HostPorts struct {
-	Proxy   int `json:"proxyPort"`
-	Control int `json:"ctrlPort"`
-	Ingress int `json:"ingressPort"`
+	Proxy       int `json:"proxyPort"`
+	Control     int `json:"ctrlPort"`
+	Ingress     int `json:"ingressPort"`
+	Transparent int `json:"transparentPort"`
 }
 
-// DefaultHostPorts returns the built-in 8080/8081/8082 mapping.
+// DefaultHostPorts returns the built-in 8080/80/8082/8084 mapping.
 func DefaultHostPorts() HostPorts {
-	return HostPorts{Proxy: DefaultProxyPort, Control: DefaultControlPort, Ingress: DefaultIngressPort}
+	return HostPorts{Proxy: DefaultProxyPort, Control: DefaultControlPort, Ingress: DefaultIngressPort, Transparent: DefaultTransparentPort}
 }
 
 // ResolveHostPorts merges, in order: defaults, ~/.piso/ports.json, process
@@ -161,14 +163,18 @@ func mergePorts(base, over HostPorts) HostPorts {
 	if over.Ingress != 0 {
 		base.Ingress = over.Ingress
 	}
+	if over.Transparent != 0 {
+		base.Transparent = over.Transparent
+	}
 	return base
 }
 
 func portsFromEnv() HostPorts {
 	return HostPorts{
-		Proxy:   envInt("PISO_PROXY_PORT"),
-		Control: envInt("PISO_CTRL_PORT"),
-		Ingress: envInt("PISO_INGRESS_PORT"),
+		Proxy:       envInt("PISO_PROXY_PORT"),
+		Control:     envInt("PISO_CTRL_PORT"),
+		Ingress:     envInt("PISO_INGRESS_PORT"),
+		Transparent: envInt("PISO_TRANSPARENT_PORT"),
 	}
 }
 
@@ -186,7 +192,7 @@ func envInt(key string) int {
 
 func validatePorts(p HostPorts) error {
 	seen := map[int]string{}
-	for name, port := range map[string]int{"proxy": p.Proxy, "control": p.Control, "ingress": p.Ingress} {
+	for name, port := range map[string]int{"proxy": p.Proxy, "control": p.Control, "ingress": p.Ingress, "transparent": p.Transparent} {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("%s port %d is out of range", name, port)
 		}

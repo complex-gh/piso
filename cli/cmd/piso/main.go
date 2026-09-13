@@ -223,6 +223,7 @@ func parseUpArgs(args []string) (string, pisoconfig.HostPorts, error) {
 	fs.IntVar(&ports.Proxy, "proxy-port", 0, "host port for the egress proxy")
 	fs.IntVar(&ports.Control, "ctrl-port", 0, "host port for the dashboard / control API")
 	fs.IntVar(&ports.Ingress, "ingress-port", 0, "host port for name.piso.local ingress")
+	fs.IntVar(&ports.Transparent, "transparent-port", 0, "host port for the transparent REDIRECT listener")
 	if err := fs.Parse(args); err != nil {
 		return "", pisoconfig.HostPorts{}, err
 	}
@@ -245,7 +246,7 @@ func registerWorkerWithGateway(proj pisoconfig.Project) error {
 		Name: proj.WorkerName(), Slug: proj.Slug, Dir: proj.Dir, IPs: ips,
 	})
 	gw := pisoconfig.GatewayURL()
-	resp, err := http.Post(gw + "/api/v1/workers", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(gw+"/api/v1/workers", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -591,7 +592,7 @@ func cmdSecrets(args []string) error {
 			switch args[i] {
 			case "--workers":
 				if i+1 < len(args) {
-					workers = splitCSV(args[i+1:i+2])
+					workers = splitCSV(args[i+1 : i+2])
 					i++
 				}
 			default:
@@ -716,13 +717,14 @@ func syncIngressHosts() error {
 }
 
 // cmdSync reconciles /etc/hosts with the gateway's routes.
-//   piso sync                     one-shot reconcile
-//   piso sync --watch             foreground watch loop (SSE route events)
-//   piso sync daemon              same loop, as the managed service body
-//   piso sync daemon-status       pidfile+ps probe (no root needed)
-//   piso sync daemon-restart      install/reload the global service (root)
-//   piso sync daemon-stop         stop it (root)
-//   piso sync daemon-uninstall    stop + remove managed config (root)
+//
+//	piso sync                     one-shot reconcile
+//	piso sync --watch             foreground watch loop (SSE route events)
+//	piso sync daemon              same loop, as the managed service body
+//	piso sync daemon-status       pidfile+ps probe (no root needed)
+//	piso sync daemon-restart      install/reload the global service (root)
+//	piso sync daemon-stop         stop it (root)
+//	piso sync daemon-uninstall    stop + remove managed config (root)
 func cmdSync(args []string) error {
 	if len(args) == 0 {
 		if err := syncIngressHosts(); err != nil {
@@ -955,10 +957,11 @@ func rebuildGateway() error {
 // to proceed. Exported as a pure function so the logic is unit-testable without
 // npm/docker round-trips.
 type updateDecision int
+
 const (
-	updateDecisionNothing   = 0 // already current and nothing changed
-	updateDecisionPackages  = 1 // extensions changed — re-stage + rebuild
-	updateDecisionRollPi    = 2 // pi pin changed — normal rollout
+	updateDecisionNothing  = 0 // already current and nothing changed
+	updateDecisionPackages = 1 // extensions changed — re-stage + rebuild
+	updateDecisionRollPi   = 2 // pi pin changed — normal rollout
 )
 
 // decideUpdate decides the cmdUpdate gate: nothing to do vs proceed.
@@ -1003,7 +1006,7 @@ func cmdUpdate(args []string) error {
 	// build context — so the rebuilt image bakes the newer extension versions
 	// alongside the new pi. Best-effort: a failure here is a warning, not fatal
 	// (the pi pin itself can still roll out).
-	if ! *dryRun {
+	if !*dryRun {
 		if err := updateHostExtensions(); err != nil {
 			fmt.Fprintf(os.Stderr, "piso: warning: extension refresh failed: %v\n", err)
 		} else {
@@ -1329,11 +1332,12 @@ func dockerComposeEnv() (map[string]string, error) {
 	}
 	p := pisoconfig.LoadHostPorts()
 	return map[string]string{
-		"DOCKER_BUILDKIT":   "1",
-		"PISO_DATA":         data,
-		"PISO_PROXY_PORT":   fmt.Sprintf("%d", p.Proxy),
-		"PISO_CTRL_PORT":    fmt.Sprintf("%d", p.Control),
-		"PISO_INGRESS_PORT": fmt.Sprintf("%d", p.Ingress),
+		"DOCKER_BUILDKIT":       "1",
+		"PISO_DATA":             data,
+		"PISO_PROXY_PORT":       fmt.Sprintf("%d", p.Proxy),
+		"PISO_CTRL_PORT":        fmt.Sprintf("%d", p.Control),
+		"PISO_INGRESS_PORT":     fmt.Sprintf("%d", p.Ingress),
+		"PISO_TRANSPARENT_PORT": fmt.Sprintf("%d", p.Transparent),
 	}, nil
 }
 

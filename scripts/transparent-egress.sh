@@ -20,8 +20,23 @@
 set -eu
 
 CHAIN=PISO_TRANSPARENT
-PORT="${PISO_TRANSPARENT_PORT:-8084}"
 HOSTS="${INTERCEPT_HOSTS:-github.com api.github.com}"
+
+# Host port for the gateway's transparent listener: env takes precedence,
+# then the persisted piso port config (~/.piso/ports.json, set by `piso up
+# --transparent-port N` or the compose default), then the built-in default.
+PORT="${PISO_TRANSPARENT_PORT:-}"
+if [ -z "$PORT" ] && [ -n "${PISO_DATA:-}" ] && [ -f "$PISO_DATA/ports.json" ]; then
+    PORT="$(python3 - "$PISO_DATA/ports.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("transparentPort", 8084))
+except Exception:
+    print(8084)
+PY
+)"
+fi
+PORT="${PORT:-8084}"
 
 die() { echo "transparent-egress: $*" >&2; exit 1; }
 
