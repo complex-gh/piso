@@ -39,15 +39,21 @@ func ValidActivityKind(k string) bool {
 // monitor on behalf of another project). It is the unit the PM board renders
 // on a project track. Stored in SQLite (activities.db): durable, queryable,
 // and out-of-band from state.json (so adding activities needs no state
-// migration).
+// migration). The store keeps FULL history — surfaces (monitor feed, loop
+// digest, board) compress/aggregate at read time, never here.
 type Activity struct {
 	ID         string `json:"id"`
-	Worker     string `json:"worker"` // container name of the reporter
-	Slug       string `json:"slug"`   // project slug of the reporter
+	Worker     string `json:"worker"`   // container name of the reporter
+	Slug       string `json:"slug"`     // project slug of the reporter
 	Kind       string `json:"kind"`
 	TargetSlug string `json:"targetSlug,omitempty"` // for pokes/reminders: which project's track
 	Text       string `json:"text"`
-	Ts         int64  `json:"ts"` // unix ms
+	Ts         int64  `json:"ts"`      // unix ms
+	// ActiveFromMs / ActiveBeats are READ-side decorations: the worker feed's
+	// active=span projection fills them when it fuses a run of beats into one
+	// synthesized row. Never persisted.
+	ActiveFromMs int64 `json:"activeFromMs,omitempty"`
+	ActiveBeats  int   `json:"activeBeats,omitempty"`
 }
 
 // ActivityFilter narrows QueryActivities. Empty fields are not filters.
@@ -187,21 +193,6 @@ func (s *Store) DeleteOwnActivity(id, worker string) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
-}
-
-// DeleteOwnActive removes every kind=active row the worker posted (prior
-// heartbeat spans). The watcher calls it before each new beat so the store
-// holds at most one live active row per worker, and the first beat after an
-// upgrade purges any legacy per-beat flood. Returns the number of rows
-// deleted.
-func (s *Store) DeleteOwnActive(worker string) (int64, error) {
-	res, err := s.activitiesDB.Exec(
-		`DELETE FROM activities WHERE worker = ? AND kind = ?`, worker, ActivityKindActive,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }
 
 // broadcastActivity notifies SSE subscribers of a new activity. Same

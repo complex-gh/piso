@@ -58,7 +58,10 @@ piBin="$(command -v pi 2>/dev/null || echo /usr/local/bin/pi)"
 MONITOR_HOME="/root/.pi/agent/monitor-work"
 mkdir -p "$MONITOR_HOME" 2>/dev/null && cd "$MONITOR_HOME" 2>/dev/null || cd /tmp 2>/dev/null || true
 
-FEED_URL="${gw}/api/v1/worker/activities?worker=${worker}"
+# active=span: the gateway fuses each worker's consecutive beats into one
+# synthesized span row per working run, so this digest mirrors EXACTLY the
+# payload the judge's LLM reads, and per-beat rows never drown either view.
+FEED_URL="${gw}/api/v1/worker/activities?worker=${worker}&active=span"
 FEED_FILE="/tmp/piso-monitor-feed.json"
 
 # Divider helpers — pure ASCII, grep-able, no unicode deps.

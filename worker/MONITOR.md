@@ -10,20 +10,22 @@ curate the board and surface pokes.
 
 The gateway's activity store, via the worker API (you are `piso-worker-monitor`):
 
-- `GET http://gateway:8083/api/v1/worker/activities?worker=piso-worker-monitor`
-  returns every project's activities: `{id, worker, slug, kind, targetSlug,
-  text, ts}`. Kinds: `progress`, `milestone`, `reminder`, `poke`, `active`,
-  `waiting`, `host`, `note`. `slug` is the source project; `targetSlug` is who a poke is aimed at.
-  `waiting` is Tier B only: the agent said the run needs the human's next input.
+- `GET http://gateway:8083/api/v1/worker/activities?worker=piso-worker-monitor&active=span`
+  returns every project's activities with heartbeats already fused: `{id,
+  worker, slug, kind, targetSlug, text, ts}`. Kinds: `progress`,
+  `milestone`, `reminder`, `poke`, `active`, `waiting`, `host`, `note`. `slug`
+  is the source project; `targetSlug` is who a poke is aimed at. `waiting` is
+  Tier B only: the agent said the run needs the human's next input.
 - Every row already carries **`ageMin`** (whole minutes since the event) and
   **`ageLabel`** ("13 min ago") — computed gateway-side against one consistent
   clock. Never convert timestamps yourself; judge on `ageMin`.
-- `active` is ONE live row per worker (the watcher upserts it in place): its
-  text embeds the running span, e.g. "working on workspace · master @b98d3c6 ·
-  for 13 min". A fresh `ageMin` means the human is mid-session; an old one means
-  work stopped at that span. (Digest span lines break at >10-min gaps — a long
-  "span" across a dark stretch means sparse beats, not continuous work.)
-- `GET http://gateway:8083/api/v1/worker/activities?worker=piso-worker-monitor&slug=<proj>`
+- `active` is one row per **working run** (the gateway fuses beats ≤ 10 min
+  apart): its text embeds the span ("working on workspace · master @b98d3c6 ·
+  for 13 min") and carries `activeBeats` (beats fused) + `activeFromMs` (run
+  start). `ageMin` is the run's END — a fresh one means the human is
+  mid-session; an old one means work stopped at that span. The store itself
+  keeps every beat; this is just your reading lens.
+- `GET http://gateway:8083/api/v1/worker/activities?worker=piso-worker-monitor&slug=<proj>&active=span`
   filters to one project.
 
 You have NO other view: no request bodies, no secrets, no dashboard. Act only

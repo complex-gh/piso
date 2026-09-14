@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"piso/gateway/internal/store"
 )
@@ -198,6 +199,62 @@ func TestWorkerActivityPostGetRevoke(t *testing.T) {
 	rev = doJSON(t, wh, "POST", "/api/v1/worker/activity/revoke", map[string]any{"id": act.ID, "worker": "piso-worker-demo"})
 	if rev.Code != 204 {
 		t.Fatalf("own revoke %d %s", rev.Code, rev.Body.String())
+	}
+}
+
+func TestWorkerActivityFeedSpanProjection(t *testing.T) {
+	s := testServer(t)
+	wh := s.WorkerHandler()
+	now := time.Now().UnixNano() / 1000000
+	// 4 beats 30s apart (one run) … a note … then a lone beat 20h earlier
+	for _, a := range []store.Activity{
+		store.Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: store.ActivityKindActive, Text: "working on x", Ts: now - 0},
+		store.Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: store.ActivityKindActive, Text: "working on x", Ts: now - 30000},
+		store.Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: store.ActivityKindActive, Text: "working on x", Ts: now - 60000},
+		store.Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: store.ActivityKindActive, Text: "working on x", Ts: now - 90000},
+		store.Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: store.ActivityKindNote, Text: "keep me", Ts: now - 120000},
+		store.Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: store.ActivityKindActive, Text: "working on x", Ts: now - 20*3600*1000},
+	} {
+		if _, err := s.Store.InsertActivity(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// raw feed: all 6 rows survive (store keeps full history)
+	raw := doJSON(t, wh, "GET", "/api/v1/worker/activities?worker=piso-worker-demo", nil)
+	var rawActs []store.Activity
+	_ = json.Unmarshal(raw.Body.Bytes(), &rawActs)
+	if raw.Code != 200 || len(rawActs) != 6 {
+		t.Fatalf("raw feed %d %d rows", raw.Code, len(rawActs))
+	}
+	// span projection: the 4-beat run fuses into one row; the 20h-later beat
+	// stays separate (gap > 10 min); the note is untouched
+	sp := doJSON(t, wh, "GET", "/api/v1/worker/activities?worker=piso-worker-demo&active=span", nil)
+	var acts []store.Activity
+	_ = json.Unmarshal(sp.Body.Bytes(), &acts)
+	if sp.Code != 200 || len(acts) != 3 {
+		t.Fatalf("span feed %d %d rows: %s", sp.Code, len(acts), sp.Body.String())
+	}
+	var note, lone, run int
+	for _, a := range acts {
+		if a.Kind == store.ActivityKindNote {
+			note += 1
+			if a.Text != "keep me" || a.ActiveBeats != 0 {
+				t.Fatalf("note mutated: %+v", a)
+			}
+		}
+		if a.Kind == store.ActivityKindActive {
+			if a.ActiveBeats >= 2 {
+				run += 1
+				if a.ActiveBeats != 4 || a.ActiveFromMs != now-90000 || !strings.Contains(a.Text, "· for 1 min") {
+					t.Fatalf("run row: %+v", a)
+				}
+			} else {
+				lone += 1
+			}
+		}
+	}
+	if note != 1 || run != 1 || lone != 1 {
+		t.Fatalf("note=%d run=%d lone=%d", note, run, lone)
 	}
 }
 

@@ -336,6 +336,61 @@ func feedView(rows []store.Activity, nowMs int64) []activityView {
 	return out
 }
 
+// activeSpanGapMs is the largest gap between consecutive beats that still
+// counts as the same working run (matches the digest's break rule).
+const activeSpanGapMs = 10 * 60 * 1000
+
+// collapseActiveSpans fuses each worker's consecutive kind=active rows into
+// one synthesized row per working run: same worker+slug+text with consecutive
+// beats ≤ activeSpanGapMs apart. The synthesized row keeps the NEWEST beat's
+// ts/id, and carries activeFromMs (run start) + activeBeats (beat count); its
+// text gains " · for N min" for multi-beat runs. Read-side ONLY — nothing is
+// deleted or rewritten; the store keeps every beat. Input is newest-first and
+// the output preserves that order.
+func collapseActiveSpans(rows []store.Activity) []store.Activity {
+	out := make([]store.Activity, 0, len(rows))
+	type run struct {
+		act    store.Activity
+		lastTs int64 // ts of the most recent beat processed (newest boundary)
+		fromTs int64 // oldest beat ts in the run
+		count  int
+	}
+	var cur *run
+	flush := func() {
+		if cur == nil {
+			return
+		}
+		if cur.count > 1 || cur.act.Ts-cur.fromTs > 60000 {
+			min := (cur.act.Ts - cur.fromTs) / 60000
+			if min < 1 {
+				min = 1
+			}
+			cur.act.Text = cur.act.Text + " · for " + strconv.FormatInt(min, 10) + " min"
+			cur.act.ActiveFromMs = cur.fromTs
+			cur.act.ActiveBeats = cur.count
+		}
+		out = append(out, cur.act)
+		cur = nil
+	}
+	for _, a := range rows {
+		if a.Kind != store.ActivityKindActive {
+			flush()
+			out = append(out, a)
+			continue
+		}
+		if cur != nil && a.Worker == cur.act.Worker && a.Slug == cur.act.Slug && a.Text == cur.act.Text && (cur.lastTs-a.Ts) <= activeSpanGapMs {
+			cur.count += 1
+			cur.fromTs = a.Ts
+			cur.lastTs = a.Ts
+			continue
+		}
+		flush()
+		cur = &run{act: a, lastTs: a.Ts, fromTs: a.Ts, count: 1}
+	}
+	flush()
+	return out
+}
+
 // handleWorkerGetActivities returns the activity feed. The monitor polls this;
 // any registered worker may read the whole feed (it is scrubbed: sanitized
 // text only). Caller identity is verified like the ports handler.
@@ -362,19 +417,22 @@ func (s *Server) handleWorkerGetActivities(w http.ResponseWriter, r *http.Reques
 	if acts == nil {
 		acts = []store.Activity{}
 	}
+	// active=span collapses each worker's consecutive beats (same slug+text,
+	// ≤ activeSpanGapMs apart) into one synthesized row per working run. This
+	// is a READ projection: the store keeps every beat; the monitor gets the
+	// compact view without timestamp arithmetic.
+	if strings.TrimSpace(r.URL.Query().Get("active")) == "span" {
+		acts = collapseActiveSpans(acts)
+	}
 	writeJSON(w, 200, feedView(acts, time.Now().UnixNano()/1000000))
 }
 
 // handleWorkerRevokeActivity removes one of the caller's own activity rows
-// (id is scoped to the posting worker), or — with {"allActive": true} — purges
-// every one of the caller's heartbeat (kind=active) rows. The watcher uses
-// the purge as an idempotent upsert so the store holds at most one live
-// active row per worker.
+// (id is scoped to the posting worker).
 func (s *Server) handleWorkerRevokeActivity(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID        string `json:"id"`
-		Worker    string `json:"worker"`
-		AllActive bool   `json:"allActive,omitempty"`
+		ID     string `json:"id"`
+		Worker string `json:"worker"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "bad json"})
@@ -382,25 +440,12 @@ func (s *Server) handleWorkerRevokeActivity(w http.ResponseWriter, r *http.Reque
 	}
 	in.ID = strings.TrimSpace(in.ID)
 	in.Worker = strings.TrimSpace(in.Worker)
-	if !workerNameRe.MatchString(in.Worker) {
-		writeJSON(w, 400, map[string]string{"error": "worker required"})
-		return
-	}
-	if in.ID == "" && !in.AllActive {
-		writeJSON(w, 400, map[string]string{"error": "id (or allActive) required"})
+	if in.ID == "" || !workerNameRe.MatchString(in.Worker) {
+		writeJSON(w, 400, map[string]string{"error": "id and worker required"})
 		return
 	}
 	if reg, ok := s.Store.WorkerByIP(requestIP(r)); ok && reg.Name != in.Worker {
 		identityMismatch(w, r, reg, in.Worker, "")
-		return
-	}
-	if in.AllActive {
-		// Idempotent purge: deleting zero rows is not an error here.
-		if _, err := s.Store.DeleteOwnActive(in.Worker); err != nil {
-			writeJSON(w, 500, map[string]string{"error": err.Error()})
-			return
-		}
-		w.WriteHeader(204)
 		return
 	}
 	deleted, err := s.Store.DeleteOwnActivity(in.ID, in.Worker)

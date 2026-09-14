@@ -85,45 +85,6 @@ func TestDeleteOwnActivityScopesToWorker(t *testing.T) {
 	}
 }
 
-func TestDeleteOwnActiveScopesToWorker(t *testing.T) {
-	st := testStore(t)
-	for _, ins := range []Activity{
-		Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: ActivityKindActive, Text: "working on x"},
-		Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: ActivityKindActive, Text: "working on x · for 3 min"},
-		Activity{Worker: "piso-worker-other", Slug: "other", Kind: ActivityKindActive, Text: "working on y"},
-		Activity{Worker: "piso-worker-demo", Slug: "demo", Kind: ActivityKindNote, Text: "keep me"},
-	} {
-		if _, err := st.InsertActivity(ins); err != nil {
-			t.Fatal(err)
-		}
-	}
-	n, err := st.DeleteOwnActive("piso-worker-demo")
-	if err != nil || n != 2 {
-		t.Fatalf("delete own active: n=%v err=%v", n, err)
-	}
-	left, err := st.QueryActivities(ActivityFilter{Limit: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// only the demo worker's active rows were purged: the note and the other
-	// worker's active survive
-	if len(left) != 2 {
-		t.Fatalf("left after purge: %+v", left)
-	}
-	kept := make(map[string]bool, 2)
-	for _, a := range left {
-		if a.Kind == ActivityKindActive && a.Worker == "piso-worker-other" {
-			kept["other-active"] = true
-		}
-		if a.Kind == ActivityKindNote && a.Worker == "piso-worker-demo" {
-			kept["demo-note"] = true
-		}
-	}
-	if len(kept) != 2 {
-		t.Fatalf("purge leaked rows: %+v", left)
-	}
-}
-
 func TestActivitiesPersistAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	st, err := New(filepath.Join(dir, "state.json"), filepath.Join(dir, "log.jsonl"), filepath.Join(dir, "patterns.json"), filepath.Join(dir, "activities.db"), 10)
