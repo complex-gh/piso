@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestParseInternal(t *testing.T) {
+func TestParseBool(t *testing.T) {
 	cases := []struct {
 		in   string
 		want bool
@@ -15,10 +15,11 @@ func TestParseInternal(t *testing.T) {
 		{"false", false},
 		{"", false},
 		{"  false  ", false},
+		{"<no value>", false},
 	}
 	for _, tc := range cases {
-		if got := parseInternal(tc.in); got != tc.want {
-			t.Fatalf("parseInternal(%q) = %v, want %v", tc.in, got, tc.want)
+		if got := parseBool(tc.in); got != tc.want {
+			t.Fatalf("parseBool(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }
@@ -48,4 +49,3 @@ func TestParseContainerIPs(t *testing.T) {
 		t.Fatal("hostnames should be rejected")
 	}
 }
-

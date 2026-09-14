@@ -1,6 +1,11 @@
 // Package dockernet inspects and repairs the shared piso Docker networks.
-// Compose will not flip Internal on an already-created bridge, so `piso up`
-// must tear down a leaky piso_vpc before recreating it from gateway.yaml.
+// Compose will not mutate an already-created bridge network: when the live
+// piso_vpc differs from the spec declared in compose/gateway.yaml, `docker
+// compose up` tries to remove and recreate it — and fails with "network has
+// active endpoints" while per-project worker containers (a different compose
+// project) are attached. `piso up` / `setup --rebuild` must therefore
+// reconcile the network first: detach the foreign worker containers and let
+// compose recreate it, then re-attach them.
 package dockernet
 
 import (
@@ -11,54 +16,219 @@ import (
 	"strings"
 )
 
-// Network names must match compose/gateway.yaml (`name:` pins).
+// Network and project names must match compose/gateway.yaml (`name:` pins).
+// GatewayProjectName is the gateway compose project (gateway + monitor): its
+// containers are reprovisioned by compose itself and must never be detached.
 const (
-	VPCName    = "piso_vpc"
-	EgressName = "piso_egress"
+	VPCName            = "piso_vpc"
+	EgressName         = "piso_egress"
+	GatewayProjectName = "piso"
 )
 
-// InspectVPC reports whether piso_vpc exists and whether Docker marked it
-// internal (off-bridge forwarding dropped). A missing network is not an error:
-// compose up will create it from gateway.yaml.
-func InspectVPC() (exists bool, internal bool, err error) {
-	out, runErr := dockerOutput("network", "inspect", VPCName, "--format", "{{.Internal}}")
-	if runErr != nil {
-		if isMissingNetwork(out, runErr) {
-			return false, false, nil
-		}
-		return false, false, fmt.Errorf("inspect %s: %s: %w", VPCName, out, runErr)
-	}
-	return true, parseInternal(out), nil
+// VPCConfig is the effective bridge configuration docker reports for a
+// network. Only the fields compose pins in gateway.yaml are checked; anything
+// else is left to Docker's defaults.
+type VPCConfig struct {
+	Driver     string
+	Internal   bool
+	EnableIPv6 bool
+	Masquerade bool // com.docker.network.bridge.enable_ip_masquerade
 }
 
-// EnsureInternal tears down piso containers and networks when piso_vpc exists
-// but is not internal. A missing network is left for compose to create.
-func EnsureInternal() error {
-	exists, internal, err := InspectVPC()
+// DesiredVPCConfig mirrors the `networks.vpc` block of compose/gateway.yaml.
+// Keep in sync when that file changes: a mismatch is exactly what makes
+// compose try to remove + recreate the network, so the CLI has to reconcile
+// it before `compose up` runs.
+func DesiredVPCConfig() VPCConfig {
+	return VPCConfig{
+		Driver:     "bridge",
+		Internal:   false, // transparent egress: workers NAT off the bridge (no proxy)
+		EnableIPv6: false,
+		Masquerade: true, // unrouted hosts egress directly; ruled hosts are host-DNATed
+	}
+}
+
+// InspectVPC reports whether piso_vpc exists and its effective bridge config.
+// A missing network is not an error: compose up will create it from
+// gateway.yaml.
+func InspectVPC() (exists bool, cfg VPCConfig, err error) {
+	out, runErr := dockerOutput("network", "inspect", VPCName, "--format",
+		`{{.Driver}}|{{.Internal}}|{{.EnableIPv6}}|{{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}`)
+	if runErr != nil {
+		if isMissingNetwork(out, runErr) {
+			return false, VPCConfig{}, nil
+		}
+		return false, VPCConfig{}, fmt.Errorf("inspect %s: %s: %w", VPCName, out, runErr)
+	}
+	parts := strings.Split(out, "|")
+	if len(parts) != 4 {
+		return false, VPCConfig{}, fmt.Errorf("inspect %s: unexpected output %q", VPCName, out)
+	}
+	return true, VPCConfig{
+		Driver:     strings.TrimSpace(parts[0]),
+		Internal:   parseBool(parts[1]),
+		EnableIPv6: parseBool(parts[2]),
+		Masquerade: parseBool(parts[3]),
+	}, nil
+}
+
+// PrepGateway reconciles piso_vpc before the gateway compose up. When the live
+// network matches DesiredVPCConfig (or is missing — compose creates it) this
+// is a no-op. On a mismatch compose would remove + recreate the network and
+// fail while foreign containers hold endpoints, so:
+//   - every attached container that is NOT owned by the gateway compose
+//     project (gateway + monitor, which compose would reprovision) is
+//     detached first; and
+//   - the gateway project's own containers are force-removed, because an
+//     earlier aborted run can leave compose's bookkeeping claiming they are
+//     still attached (their endpoints are long gone) — compose then errors
+//     "container ... is not connected to the network piso_vpc" during the
+//     network teardown instead of recreating them.
+//
+// The detached workers must be re-attached by ReconnectWorkers after compose
+// up: the rebuild gives them a new vpc IP.
+func PrepGateway() error {
+	exists, cfg, err := InspectVPC()
 	if err != nil {
 		return err
 	}
-	if !exists || internal {
+	if !exists || cfg == DesiredVPCConfig() {
 		return nil
 	}
-	fmt.Printf("piso: %s is not internal — tearing down piso containers and networks\n", VPCName)
-	return RemoveRuntime()
+	fmt.Printf("piso: %s config changed (want %+v, live %+v) — restoring workers across the network rebuild\n",
+		VPCName, DesiredVPCConfig(), cfg)
+	members, err := vpcMembers()
+	if err != nil {
+		return err
+	}
+	for _, name := range members {
+		if proj, _ := containerLabel(name, "com.docker.compose.project"); proj == GatewayProjectName {
+			continue
+		}
+		if out, err := dockerOutput("network", "disconnect", "-f", VPCName, name); err != nil {
+			return fmt.Errorf("disconnect %s from %s: %s: %w", name, VPCName, out, err)
+		}
+	}
+	return removeProjectContainers(GatewayProjectName)
 }
 
-// AssertInternal fails if piso_vpc is missing or not internal. Call after
-// gateway compose up so a leftover leaky network cannot silently survive.
-func AssertInternal() error {
-	exists, internal, err := InspectVPC()
+// ReconnectWorkers attaches every existing per-project worker container that
+// is not currently on piso_vpc (compose just recreated the network, so any
+// worker is detached until put back — including ones left detached by an
+// earlier aborted run). Returns the newly attached names so the caller can
+// refresh their slug↔IP registry entry. A worker that cannot attach is a
+// warning, not a fatal error: the network migration already succeeded and a
+// later `piso up` for that project re-attaches it.
+func ReconnectWorkers() ([]string, error) {
+	members, err := vpcMembers()
+	if err != nil {
+		return nil, err
+	}
+	attached := make(map[string]bool, len(members))
+	for _, n := range members {
+		attached[n] = true
+	}
+	workers, err := workerContainers()
+	if err != nil {
+		return nil, err
+	}
+	var reconnected []string
+	for _, name := range workers {
+		if attached[name] {
+			continue
+		}
+		if err := Reconnect(name); err != nil {
+			fmt.Fprintf(os.Stderr, "piso: warning: reattach %s: %v\n", name, err)
+			continue
+		}
+		reconnected = append(reconnected, name)
+	}
+	return reconnected, nil
+}
+
+// Reconnect attaches a container that PrepGateway detached to the freshly
+// created piso_vpc. Its vpc IP changes: reconnect before re-registering the
+// slug↔IP entry with the gateway.
+func Reconnect(name string) error {
+	if out, err := dockerOutput("network", "connect", VPCName, name); err != nil {
+		return fmt.Errorf("reconnect %s to %s: %s: %w", name, VPCName, out, err)
+	}
+	return nil
+}
+
+// workerContainers lists existing per-project worker containers (all
+// piso-worker-* except the gateway project's monitor), running or not.
+func workerContainers() ([]string, error) {
+	out, err := dockerOutput("ps", "-a", "--filter", "name=piso-worker-", "--format", "{{.Names}}")
+	if err != nil {
+		return nil, fmt.Errorf("list worker containers: %s: %w", out, err)
+	}
+	workers := []string{}
+	for _, name := range strings.Fields(out) {
+		if name != "piso-worker-monitor" {
+			workers = append(workers, name)
+		}
+	}
+	return workers, nil
+}
+
+// removeProjectContainers force-removes one compose project's containers so
+// compose recreates them from a clean slate. Missing containers are fine.
+func removeProjectContainers(project string) error {
+	out, err := dockerOutput("ps", "-aq", "--filter", "label=com.docker.compose.project="+project)
+	if err != nil {
+		return fmt.Errorf("list %s project containers: %s: %w", project, out, err)
+	}
+	ids := strings.Fields(out)
+	if len(ids) == 0 {
+		return nil
+	}
+	fmt.Printf("piso: removing stale %s-project containers for a clean network rebuild\n", project)
+	if out, err := dockerOutput(append([]string{"rm", "-f"}, ids...)...); err != nil {
+		return fmt.Errorf("remove %s-project containers: %s: %w", project, out, err)
+	}
+	return nil
+}
+
+// AssertVPC fails if piso_vpc is missing or does not match the declared spec.
+// Call after gateway compose up so a stale or leaky network cannot silently
+// survive.
+func AssertVPC() error {
+	exists, cfg, err := InspectVPC()
 	if err != nil {
 		return err
 	}
 	if !exists {
 		return fmt.Errorf("%s is missing after compose up", VPCName)
 	}
-	if !internal {
-		return fmt.Errorf("%s is not internal (workers can bypass the gateway)", VPCName)
+	if cfg != DesiredVPCConfig() {
+		return fmt.Errorf("%s config mismatch after compose up: live %+v, want %+v", VPCName, cfg, DesiredVPCConfig())
 	}
 	return nil
+}
+
+// vpcMembers returns the names of every container currently attached to
+// piso_vpc.
+func vpcMembers() ([]string, error) {
+	out, err := dockerOutput("network", "inspect", VPCName, "--format",
+		"{{range $k, $v := .Containers}}{{$v.Name}} {{end}}")
+	if err != nil {
+		return nil, fmt.Errorf("list %s members: %s: %w", VPCName, out, err)
+	}
+	return strings.Fields(out), nil
+}
+
+// containerLabel reads one Config label from a container. Missing labels are
+// reported as "" (the Go template prints "<no value>").
+func containerLabel(name, key string) (string, error) {
+	out, err := dockerOutput("inspect", "-f", `{{index .Config.Labels "`+key+`"}}`, name)
+	if err != nil {
+		return "", fmt.Errorf("inspect label %s of %s: %s: %w", key, name, out, err)
+	}
+	if out == "" || out == "<no value>" {
+		return "", nil
+	}
+	return out, nil
 }
 
 // RemoveRuntime force-removes piso-gateway / piso-worker-* containers and
@@ -84,8 +254,9 @@ func RemoveRuntime() error {
 	return nil
 }
 
-// parseInternal interprets `docker network inspect --format {{.Internal}}`.
-func parseInternal(out string) bool {
+// parseBool interprets a docker inspect boolean field ({{.Internal}},
+// {{.EnableIPv6}}, masquerade option). Unknown values are false.
+func parseBool(out string) bool {
 	return strings.EqualFold(strings.TrimSpace(out), "true")
 }
 

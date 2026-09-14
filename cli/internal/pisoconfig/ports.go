@@ -2,12 +2,15 @@ package pisoconfig
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Default host-published ports. Control defaults to 80 so the dashboard is
@@ -123,14 +126,31 @@ func CheckHostPortsFree(p HostPorts) error {
 }
 
 func probePort(port int) error {
-	if err := tryListen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err != nil {
+	// The CLI never binds these host ports itself — the gateway container
+	// publishes them (Docker daemon runs as root). A bind-permission error
+	// on a privileged port (<1024, macOS/Linux) therefore says nothing about
+	// whether the port is free: fall back to listener detection, which is
+	// the real conflict we guard against.
+	if err := probeAddr(port, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err != nil {
 		return err
 	}
-	err := tryListen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
-	if err == nil || isUnusableIPv6(err) {
-		return nil
+	if err := probeAddr(port, "tcp6", net.JoinHostPort("::1", strconv.Itoa(port))); err != nil && !isUnusableIPv6(err) {
+		return err
 	}
-	return err
+	return nil
+}
+
+// probeAddr is tryListen plus the privileged-port fallback: when we cannot
+// bind because of permissions and nothing is actually listening, the port is
+// free for Docker to publish.
+func probeAddr(port int, network, addr string) error {
+	if err := tryListen(network, addr); err == nil {
+		return nil
+	} else if isPermissionErr(err) && !portListened(port) {
+		return nil
+	} else {
+		return err
+	}
 }
 
 func tryListen(network, addr string) error {
@@ -139,6 +159,38 @@ func tryListen(network, addr string) error {
 		return err
 	}
 	return ln.Close()
+}
+
+// isPermissionErr reports the bind failures that mean "we lack privilege",
+// as opposed to EADDRINUSE (something really holds the port).
+func isPermissionErr(err error) bool {
+	return errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
+}
+
+// portListened reports whether any process is actually listening on the host
+// port, using lsof, ss, or netstat in that order. Only consulted for
+// privileged ports the CLI cannot bind; Docker (root daemon) can still
+// publish a port no one else owns.
+func portListened(port int) bool {
+	s := strconv.Itoa(port)
+	if bin, err := exec.LookPath("lsof"); err == nil {
+		out, err := exec.Command(bin, "-nP", "-iTCP:"+s, "-sTCP:LISTEN").Output()
+		return err == nil && len(strings.TrimSpace(string(out))) > 0
+	}
+	if bin, err := exec.LookPath("ss"); err == nil {
+		out, err := exec.Command(bin, "-H", "-lnt", "sport", "= :"+s).Output()
+		return err == nil && len(strings.TrimSpace(string(out))) > 0
+	}
+	if bin, err := exec.LookPath("netstat"); err == nil {
+		if out, err := exec.Command(bin, "-an").Output(); err == nil {
+			for _, ln := range strings.Split(string(out), "\n") {
+				if strings.Contains(ln, "LISTEN") && strings.Contains(ln, ":"+s+" ") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // isUnusableIPv6 reports a machine that cannot bind ::1 at all (not "in use").

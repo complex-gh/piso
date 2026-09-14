@@ -173,8 +173,8 @@ func cmdUp(args []string) error {
 		}
 	}
 
-	// 1. gateway (shared, one per machine). Compose will not flip Internal on
-	// an already-created piso_vpc, so tear down a leaky one first.
+	// 1. gateway (shared, one per machine). startGateway reconciles piso_vpc
+	// with gateway.yaml's spec — compose cannot mutate an existing network.
 	if err := startGateway(false); err != nil {
 		return err
 	}
@@ -242,9 +242,37 @@ func registerWorkerWithGateway(proj pisoconfig.Project) error {
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(pisoconfig.WorkerIn{
+	return registerWorker(pisoconfig.WorkerIn{
 		Name: proj.WorkerName(), Slug: proj.Slug, Dir: proj.Dir, IPs: ips,
 	})
+}
+
+// registerContainerWithGateway refreshes the slug↔IP registry entry for a
+// worker whose vpc IP changed (piso_vpc rebuild via PrepGateway/Reconnect).
+// The existing registry Dir is kept; only the IPs change. Best-effort.
+func registerContainerWithGateway(name string) error {
+	ips, err := dockernet.ContainerIPs(name)
+	if err != nil {
+		return err
+	}
+	dir := ""
+	var recs []pisoconfig.WorkerRec
+	if err := getJSON(pisoconfig.GatewayURL()+"/api/v1/workers", &recs); err == nil {
+		for _, r := range recs {
+			if r.Name == name {
+				dir = r.Dir
+				break
+			}
+		}
+	}
+	return registerWorker(pisoconfig.WorkerIn{
+		Name: name, Slug: strings.TrimPrefix(name, "piso-worker-"), Dir: dir, IPs: ips,
+	})
+}
+
+// registerWorker posts one entry to the gateway's slug↔IP registry.
+func registerWorker(in pisoconfig.WorkerIn) error {
+	body, _ := json.Marshal(in)
 	gw := pisoconfig.GatewayURL()
 	resp, err := http.Post(gw+"/api/v1/workers", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -515,16 +543,16 @@ func cmdStatus(args []string) error {
 	} else {
 		fmt.Println("gateway: DOWN (run `piso up`)")
 	}
-	exists, internal, err := dockernet.InspectVPC()
+	exists, cfg, err := dockernet.InspectVPC()
 	switch {
 	case err != nil:
 		fmt.Printf("piso_vpc: inspect failed: %v\n", err)
 	case !exists:
 		fmt.Println("piso_vpc: missing")
-	case internal:
-		fmt.Println("piso_vpc: internal")
+	case cfg == dockernet.DesiredVPCConfig():
+		fmt.Println("piso_vpc: transparent egress (workers NAT directly, ruled hosts MITM'd)")
 	default:
-		fmt.Println("piso_vpc: NOT internal (workers can bypass the gateway)")
+		fmt.Printf("piso_vpc: stale config (%+v) — run `piso up` to rebuild\n", cfg)
 	}
 	out, _ := exec.Command("docker", "ps", "--format", "{{.Names}}\t{{.Status}}").Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -1288,7 +1316,11 @@ func recreateWorker(w pisoconfig.WorkerRec) error {
 // rebuilds the image and replaces the container so `make install` picks up
 // new gateway code and runs store migrations against ~/.piso/state.json.
 func startGateway(forceRecreate bool) error {
-	if err := dockernet.EnsureInternal(); err != nil {
+	// If the live piso_vpc no longer matches gateway.yaml's spec, compose would
+	// try to remove + recreate it and fail on the workers' endpoints (and on
+	// its own stale bookkeeping). PrepGateway detaches the per-project workers
+	// and clears the gateway project's containers so compose starts clean.
+	if err := dockernet.PrepGateway(); err != nil {
 		return err
 	}
 	gatewayFile, err := pisoconfig.GatewayCompose()
@@ -1306,7 +1338,19 @@ func startGateway(forceRecreate bool) error {
 	if err := runEnv("docker", args, composeEnv); err != nil {
 		return fmt.Errorf("gateway up: %w", err)
 	}
-	return dockernet.AssertInternal()
+	// The network was just rebuilt, so every worker is detached until put
+	// back — including any left detached by an earlier aborted run. Attach
+	// them and refresh their slug↔IP registry entry (new vpc IP).
+	reconnected, err := dockernet.ReconnectWorkers()
+	if err != nil {
+		return fmt.Errorf("reconnect workers: %w", err)
+	}
+	for _, name := range reconnected {
+		if err := registerContainerWithGateway(name); err != nil {
+			fmt.Fprintf(os.Stderr, "piso: warning: reregister %s: %v\n", name, err)
+		}
+	}
+	return dockernet.AssertVPC()
 }
 
 // waitGatewayHealthy polls the control plane until it answers or 30s elapses.
