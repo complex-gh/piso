@@ -391,9 +391,55 @@ func collapseActiveSpans(rows []store.Activity) []store.Activity {
 	return out
 }
 
+// dropSessionStartedNotes removes the Tier-A watcher's "session started" notes.
+// Those are noise for the monitor (a start is visible as the first active/idle
+// row). "session ended" is KEPT: it is how the judge knows pi is gone, so an
+// earlier idle is not left as the latest event.
+func dropSessionStartedNotes(rows []store.Activity) []store.Activity {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := rows[:0]
+	for _, a := range rows {
+		if a.Kind == store.ActivityKindNote && a.Text == "session started" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// limitToLastJudgment time-limits each project's rows to events at/after the
+// requesting worker's last own posting aimed at that project (its judgement;
+// last maps project slug → newest ts). Projects the worker never judged, and
+// the worker's own rows (their slug is not a judgement target), are kept in
+// full — so the monitor still sees its own poke history and only its judged
+// projects' pre-judgement history is suppressed.
+func limitToLastJudgment(rows []store.Activity, last map[string]int64) []store.Activity {
+	if len(last) == 0 {
+		return rows
+	}
+	out := rows[:0]
+	for _, a := range rows {
+		if t, ok := last[a.Slug]; ok && a.Ts < t {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // handleWorkerGetActivities returns the activity feed. The monitor polls this;
 // any registered worker may read the whole feed (it is scrubbed: sanitized
 // text only). Caller identity is verified like the ports handler.
+//
+// Two read-side decisions shape the series of events returned (nothing is
+// deleted; the store keeps full history):
+//   - "session started" notes are omitted; "session ended" is kept (pi gone).
+//   - Unless an explicit `since` is given, each project's rows are time-limited
+//     to events newer than the requesting worker's last judgement aimed at that
+//     project (the monitor never re-judges history it already acted on).
+//   - `active=span` then fuses consecutive beats into one row per working run.
 func (s *Server) handleWorkerGetActivities(w http.ResponseWriter, r *http.Request) {
 	worker := strings.TrimSpace(r.URL.Query().Get("worker"))
 	if !workerNameRe.MatchString(worker) {
@@ -409,13 +455,64 @@ func (s *Server) handleWorkerGetActivities(w http.ResponseWriter, r *http.Reques
 		Slug:    strings.TrimSpace(r.URL.Query().Get("slug")),
 		Limit:   atoiDefault(r.URL.Query().Get("limit"), 500),
 	}
+	// Explicit `since` (unix ms) overrides the derived judgement window.
+	explicitSince := ""
+	if v := strings.TrimSpace(r.URL.Query().Get("since")); v != "" {
+		explicitSince = v
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			f.SinceMs = n
+		}
+	}
 	acts, err := s.Store.QueryActivities(f)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	// Track semantics for `slug=`: a project's timeline is not only its own
+	// rows — pokes/reminders/notes AIMED at it (monitor-sourced rows carry
+	// targetSlug, not the reporter's slug) belong on its track. The board
+	// renders them there (targetSlug wins over slug); the feed must do the
+	// same or a per-project read misses the pokes on its track.
+	if f.Slug != "" {
+		aimed, aerr := s.Store.QueryActivities(store.ActivityFilter{
+			TargetSlug: f.Slug, Kind: f.Kind, SinceMs: f.SinceMs, Limit: f.Limit,
+		})
+		if aerr != nil {
+			writeJSON(w, 500, map[string]string{"error": aerr.Error()})
+			return
+		}
+		if len(aimed) > 0 {
+			merged := make([]store.Activity, 0, len(acts)+len(aimed))
+			seen := make(map[string]bool)
+			i, j := 0, 0 // both queries return newest-first
+			for i < len(acts) || j < len(aimed) {
+				var p store.Activity
+				if j >= len(aimed) || (i < len(acts) && acts[i].Ts >= aimed[j].Ts) {
+					p = acts[i]
+					i += 1
+				} else {
+					p = aimed[j]
+					j += 1
+				}
+				if !seen[p.ID] { // a self-poke (slug==target) matches both sides
+					seen[p.ID] = true
+					merged = append(merged, p)
+				}
+			}
+			if len(merged) > f.Limit {
+				merged = merged[:f.Limit]
+			}
+			acts = merged
+		}
+	}
 	if acts == nil {
 		acts = []store.Activity{}
+	}
+	acts = dropSessionStartedNotes(acts)
+	if explicitSince == "" {
+		if last, err := s.Store.NewestTsByTarget(worker); err == nil && len(last) > 0 {
+			acts = limitToLastJudgment(acts, last)
+		}
 	}
 	// active=span collapses each worker's consecutive beats (same slug+text,
 	// ≤ activeSpanGapMs apart) into one synthesized row per working run. This

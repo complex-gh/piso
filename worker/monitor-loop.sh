@@ -59,8 +59,11 @@ MONITOR_HOME="/root/.pi/agent/monitor-work"
 mkdir -p "$MONITOR_HOME" 2>/dev/null && cd "$MONITOR_HOME" 2>/dev/null || cd /tmp 2>/dev/null || true
 
 # active=span: the gateway fuses each worker's consecutive beats into one
-# synthesized span row per working run, so this digest mirrors EXACTLY the
-# payload the judge's LLM reads, and per-beat rows never drown either view.
+# synthesized span row per working run, so per-beat rows never drown the view.
+# The gateway also time-limits the feed per project to events newer than the
+# monitor's last judgement for that project, omits session-started notes, and
+# keeps session-ended + idle — so the digest mirrors EXACTLY the payload the
+# judge's LLM reads (no since= needed; a since= would override the window).
 FEED_URL="${gw}/api/v1/worker/activities?worker=${worker}&active=span"
 FEED_FILE="/tmp/piso-monitor-feed.json"
 
@@ -132,9 +135,18 @@ def base(v):
 def ms(v):
     return v if v > 10_000_000_000 else v * 1000
 
+def track_of(a):
+    # same mapping as the board: a poke/note aimed at a project lives on
+    # that project's track, not the reporter's (monitor) track.
+    t = a.get("targetSlug") or ""
+    s = a.get("slug") or "?"
+    if t and t != s:
+        return t
+    return s
+
 groups, order = {}, []
 for a in rows:
-    s = a.get("slug") or "?"
+    s = track_of(a)
     if s not in groups:
         groups[s] = []
         order.append(s)

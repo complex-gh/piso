@@ -7,10 +7,11 @@
 # Design notes
 # - Same pattern as context-watch / ports-watch: in-container loop, POST to the
 #   worker API (GATEWAY_URL, :8083) — never the host control plane.
-# - Events: kind=active (alive beat w/ project context), kind=note (session
-#   start/end). A gap of > 3 min between active beats is downtime (the board
-#   will not extend the block). Idle-at-prompt is not active; `waiting` is
-#   Tier B only (the agent emits it via piso-informant).
+# - Events: kind=active (alive beat w/ project context), kind=idle (pi is up
+#   but not working for ≥ IDLE_SECS — one row per idle stretch), kind=note
+#   (session start/end). Idle-at-prompt is NOT active; `waiting` is still
+#   Tier B only (the agent asked a question). `idle` is the positive signal
+#   the monitor pokes on: session attached, nobody working.
 # - Sanitization identical to context-watch (control chars → space, cap len).
 set -u
 
@@ -28,6 +29,7 @@ BEAT_SECS=30             # active span refresh at most every 30 s: each beat
                          # so the store/feed never flood — and the board's live
                          # marker stays fresh. The row's text embeds the elapsed
                          # span ("working on … · for 13 min").
+IDLE_SECS=600            # pi up + not working for this long → one idle row
 RESCAN_SECS=3            # check for session boundary/beat every 3 s
 GIT=(git -c safe.directory=*)
 
@@ -234,6 +236,8 @@ PY
 
 last_beat=0
 last_state=""   # "up" | "down"
+idle_since=0    # unix secs when this not-working stretch began; 0 = n/a
+idle_posted=0   # 1 once an idle row has been posted for this stretch
 while true; do
   drain_spool
   now=$(date +%s 2>/dev/null) || now=0
@@ -253,6 +257,8 @@ while true; do
     # the boundary is recorded and the live loop must not re-fire it.
     last_state="$state"
     last_beat=0   # force a fresh active beat after a boundary
+    idle_since=0
+    idle_posted=0
   fi
 
   # alive beat — the board's live marker. Fire when there is recent session-file
@@ -267,10 +273,25 @@ while true; do
   if [ "$state" = "up" ] && { [ "$jsonl_fresh" = "1" ] || [ "$status" = "busy" ]; }; then
     working=1
   fi
-  if [ "$working" = "1" ] && [ $((now - last_beat)) -ge "$BEAT_SECS" ]; then
-    ctx="$(proj_ctx)"
-    if post "active" "working on ${ctx:-unknown}"; then
-      last_beat=$now
+  if [ "$working" = "1" ]; then
+    idle_since=0
+    idle_posted=0
+    if [ $((now - last_beat)) -ge "$BEAT_SECS" ]; then
+      ctx="$(proj_ctx)"
+      if post "active" "working on ${ctx:-unknown}"; then
+        last_beat=$now
+      fi
+    fi
+  elif [ "$state" = "up" ]; then
+    # pi is attached and not working: start (or continue) the idle clock.
+    # One idle row per stretch, after IDLE_SECS — the monitor pokes on this.
+    if [ "$idle_since" -eq 0 ]; then
+      idle_since=$now
+    fi
+    if [ "$idle_posted" -eq 0 ] && [ $((now - idle_since)) -ge "$IDLE_SECS" ]; then
+      ctx="$(proj_ctx)"
+      post "idle" "idle at prompt · ${ctx:-unknown}" || true
+      idle_posted=1   # even on spool: do not re-fire this stretch
     fi
   fi
 

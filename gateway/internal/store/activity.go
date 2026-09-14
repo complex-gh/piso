@@ -20,6 +20,7 @@ const (
 	ActivityKindPoke      = "poke"      // a nudge (monitor → target project)
 	ActivityKindActive    = "active"    // watcher heartbeat: worker is alive
 	ActivityKindWaiting   = "waiting"   // agent run ended; human input needed
+	ActivityKindIdle      = "idle"      // Tier A: pi is up but not working (at the prompt)
 	ActivityKindHost      = "host"      // host action required (sandbox boundary)
 	ActivityKindNote      = "note"      // unstructured note
 )
@@ -29,7 +30,7 @@ func ValidActivityKind(k string) bool {
 	switch k {
 	case ActivityKindProgress, ActivityKindMilestone, ActivityKindReminder,
 		ActivityKindPoke, ActivityKindActive, ActivityKindWaiting,
-		ActivityKindHost, ActivityKindNote:
+		ActivityKindIdle, ActivityKindHost, ActivityKindNote:
 		return true
 	}
 	return false
@@ -178,6 +179,33 @@ func (s *Store) QueryActivities(f ActivityFilter) ([]Activity, error) {
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// NewestTsByTarget returns, per target_slug, the newest ts of any activity
+// posted by worker (rows with no target map to ""). The worker feed uses
+// this to time-limit each project's rows to events since the requesting
+// worker's last posting aimed at that project — for the monitor, its last
+// judgement (poke/note/reminder) about the project. Nothing is deleted; this
+// is a read-side window like the span projection below.
+func (s *Store) NewestTsByTarget(worker string) (map[string]int64, error) {
+	rows, err := s.activitiesDB.Query(
+		`SELECT COALESCE(target_slug, ''), MAX(ts) FROM activities WHERE worker = ? GROUP BY COALESCE(target_slug, '')`,
+		worker,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var target string
+		var ts int64
+		if err := rows.Scan(&target, &ts); err != nil {
+			return nil, err
+		}
+		out[target] = ts
 	}
 	return out, rows.Err()
 }
