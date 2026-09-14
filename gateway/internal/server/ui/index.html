@@ -30,6 +30,22 @@
   #tab-log th:nth-child(4), #tab-log td:nth-child(4) { width:7.5rem }
   #tab-log .log-url { display:block; overflow-wrap:anywhere; word-break:break-word }
   #tab-log .log-detail { display:block; margin-top:4px; color:var(--muted); font-size:12px }
+  /* gateway↔workers topology diagram (top of Request log) */
+  .topo { margin:0 0 14px; overflow:hidden }
+  #topoSvg { display:block; width:100%; height:auto }
+  /* spine (trunk) is drawn once and stays static; each worker owns only its
+     own stub+drop segments, so no lines stack and flashes never bleed onto
+     other workers' paths. */
+  .tspine, .tlink { fill:none; stroke:var(--muted); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; opacity:1 }
+  .tlink.flash { animation: topoLinkFlash 1.4s ease-out forwards }
+  @keyframes topoLinkFlash { 0%, 70% { stroke:var(--ok); stroke-width:3.4; opacity:1 } 100% { stroke:var(--muted); stroke-width:2; opacity:1 } }
+  .tnode rect { fill:var(--panel); stroke:var(--border); stroke-width:1.2; rx:8 }
+  .tnode text { font:600 12.5px -apple-system,"Segoe UI",Roboto,sans-serif; fill:var(--fg); text-anchor:middle }
+  .tnode.flash rect { animation: topoNodeFlash 1.4s ease-out forwards }
+  @keyframes topoNodeFlash { 0%, 70% { stroke:var(--ok); stroke-width:2.6 } 100% { stroke:var(--border); stroke-width:1.2 } }
+  .tgw rect { fill:var(--panel); stroke:var(--accent); stroke-width:1.6; rx:8 }
+  .tgw text { font:700 13px -apple-system,"Segoe UI",Roboto,sans-serif; fill:var(--fg); text-anchor:middle }
+  .tempty { font:500 12px -apple-system,"Segoe UI",Roboto,sans-serif; fill:var(--muted); text-anchor:middle }
   .logbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap }
   .logbar .muted { font-size:12px }
   .logbar input[type="text"] { min-width:220px; background:var(--panel); border:1px solid var(--border); color:var(--fg); padding:7px 10px; border-radius:6px; font-size:13px }
@@ -170,6 +186,9 @@
 
   <!-- REQUEST LOG -->
   <section class="tab active" id="tab-log">
+    <div class="topo" id="topo">
+      <svg id="topoSvg" role="img" aria-label="gateway to workers topology"></svg>
+    </div>
     <div class="logbar">
       <button type="button" class="btn" id="openFailModal">Blocked secrets (<span id="failCount">0</span>)</button>
       <input type="text" id="logFilter" placeholder="filter by worker or URL…" autocomplete="off">
@@ -366,6 +385,10 @@ function activateTab(name) {
   // Board tab is display:none until active; measure viewport only after it is shown.
   if (name === 'board' && typeof bRender === 'function') {
     bRender();
+  }
+  // The topology svg has zero width while hidden; re-measure once shown.
+  if (name === 'log' && typeof topoRelayout === 'function') {
+    topoRelayout();
   }
 }
 function tabFromHash() {
@@ -770,9 +793,9 @@ async function loadLog() {
 }
 function streamLog() {
   const es = new EventSource('/api/v1/requests/stream');
-  es.addEventListener('record', ev => { const r = JSON.parse(ev.data); logRow(r); });
+  es.addEventListener('record', ev => { const r = JSON.parse(ev.data); logRow(r); topoFlash(r); });
   es.addEventListener('planning', ev => { loadPlanning().catch(() => {}); });
-  es.addEventListener('route', ev => { loadRoutes().catch(() => {}); });
+  es.addEventListener('route', ev => { loadRoutes().catch(() => {}); loadTopo().catch(() => {}); });
   es.addEventListener('activity', ev => { loadBoard().catch(() => {}); });
   es.onerror = () => {};
 }
@@ -781,6 +804,142 @@ $('#logFilter').oninput = ev => {
   clearTimeout(logDebounce);
   logDebounce = setTimeout(() => { loadLog().catch(() => {}); }, 150);
 };
+
+// ---- gateway↔worker topology (top of Request log) ----
+// A small orthogonal tree: one Gateway node centered on top, one box per
+// registered worker below (grid: left→right, then top→bottom), each box tied
+// to the gateway by right-angle segments: a shared trunk + bus drawn once
+// (static spine), then per-worker horizontal stub + vertical drop. Every new
+// log record flashes only that worker's own segments (stub, drop, box) in
+// green via topoFlash (called from the live SSE handler, not the initial load).
+const topoWorkers = [];  // [{name, slug, key, path?, group?}] — path/group filled at render
+let topoDirty = true;    // DOM or measured width is stale → needs re-render
+let topoResizeT = null;
+let topoPolled = false;
+
+function topoKey(name, slug) {
+  return (slug && slug !== 'worker') ? slug : name;
+}
+function topoListFrom(ws) {
+  return (ws || []).map(w => ({ name: String(w.name || ''), slug: String(w.slug || ''), key: topoKey(w.name, w.slug) }));
+}
+function topoOutdated(next) {
+  if (next.length !== topoWorkers.length) { return true; }
+  return next.some((w, i) => w.key !== topoWorkers[i].key);
+}
+
+// Called from loadWorkers (boot + route events) and the 10s light poll so the
+// diagram tracks the worker registry; re-renders only when the set changed or
+// the DOM is stale (e.g. the tab was hidden during boot).
+function topoSync(ws) {
+  const next = topoListFrom(ws);
+  if (topoOutdated(next)) {
+    topoWorkers.length = 0;
+    topoWorkers.push(...next);
+    topoDirty = true;
+  }
+  if (topoDirty) { topoRelayout(); }
+}
+
+async function loadTopo() {
+  try {
+    const ws = await api('/api/v1/workers');
+    topoSync(ws);
+  } catch (e) { /* registry read can wait for the next tick */ }
+}
+function ensureTopoPoll() {
+  if (topoPolled) { return; }
+  topoPolled = true;
+  setInterval(() => { loadTopo().catch(() => {}); }, 10000);
+}
+
+// Re-measure/re-draw now. The svg has zero width while #tab-log is hidden, so
+// skip and stay dirty; activateTab('log') and window resize call this again.
+function topoRelayout() {
+  if (!$('#tab-log').classList.contains('active')) { topoDirty = true; return; }
+  topoDirty = false;
+  renderTopo();
+}
+
+function renderTopo() {
+  const svg = $('#topoSvg');
+  const W = Math.floor($('#topo').clientWidth);
+  if (!svg || W < 200) { topoDirty = true; return; }
+  while (svg.firstChild) { svg.removeChild(svg.firstChild); }
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (tag, attrs, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in (attrs || {})) { e.setAttribute(k, String(attrs[k])); }
+    if (text != null) { e.textContent = String(text); }
+    return e;
+  };
+  const GW = 170, GH = 44, BW = 150, BH = 40;   // box sizes
+  const TOP = 12, TRUNK = 66, DROP = 30,        // vertical rhythm
+        ROWGAP = 12, BOT = 14, PAD = 22, GAP = 24; // spacing
+  const gwCx = W / 2, gwTop = TOP, gwBottom = gwTop + GH;
+  const busY = gwBottom + TRUNK;
+
+  const gw = mk('g', { class: 'tgw' });
+  gw.append(mk('rect', { x: Math.round(gwCx - GW/2), y: gwTop, width: GW, height: GH }));
+  gw.append(mk('text', { x: gwCx, y: gwTop + GH/2 + 4.5 }, 'Gateway'));
+  svg.append(gw);
+
+  let H;
+  const n = topoWorkers.length;
+  if (n === 0) {
+    svg.append(mk('text', { class: 'tempty', x: gwCx, y: gwBottom + 34 }, 'no workers connected'));
+    H = gwBottom + 60;
+  } else {
+    const cols = Math.max(1, Math.floor((W - 2*PAD + GAP) / (BW + GAP)));
+    const gridW = cols*BW + (cols - 1)*GAP;
+    const x0 = (W - gridW) / 2;
+    // Shared trunk: gateway bottom → bus level. Drawn once so nothing stacks.
+    svg.append(mk('path', {
+      class: 'tspine',
+      d: `M ${Math.round(gwCx)} ${gwBottom} L ${Math.round(gwCx)} ${busY}`
+    }));
+    topoWorkers.forEach((w, i) => {
+      const col = i % cols, row = Math.floor(i / cols);
+      const cx = x0 + col*(BW + GAP) + BW/2;
+      const boxTop = busY + DROP + row*(BH + ROWGAP);
+      // The worker's own segments: horizontal stub from the trunk to its
+      // column, then a vertical drop into the box. This geometry never
+      // overlaps any other worker's, so it can flash alone.
+      const path = mk('path', {
+        class: 'tlink',
+        d: `M ${Math.round(gwCx)} ${busY} L ${Math.round(cx)} ${busY} L ${Math.round(cx)} ${boxTop}`
+      });
+      svg.append(path);
+      const grp = mk('g', { class: 'tnode' });
+      const label = w.key || 'worker';
+      grp.append(mk('rect', { x: Math.round(cx - BW/2), y: boxTop, width: BW, height: BH }));
+      grp.append(mk('text', { x: cx, y: boxTop + BH/2 + 4.5, 'font-size': label.length > 16 ? 11 : 12.5 }, label));
+      grp.append(mk('title', {}, w.name || w.key));
+      svg.append(grp);
+      w.path = path;
+      w.group = grp;
+    });
+    const rows = Math.ceil(n / cols);
+    H = TOP + GH + TRUNK + DROP + (rows - 1)*(BH + ROWGAP) + BH + BOT;
+  }
+  svg.setAttribute('viewBox', `0 0 ${W} ${Math.ceil(H)}`);
+}
+
+// Light up the connecting path (+ box) of the worker a log record belongs to.
+// Matches by slug first, falling back to the registry worker name; records
+// with no registry node (internal gateway traffic) simply don't flash.
+function topoFlash(r) {
+  if (topoWorkers.length === 0) { return; }
+  const slug = r.slug, worker = r.worker;
+  const hit = topoWorkers.find(w =>
+    (slug && slug !== 'worker' && slug === w.slug) || (worker && worker === w.name));
+  if (!hit || !hit.path) { return; }
+  [hit.path, hit.group].forEach(node => {
+    node.classList.remove('flash');
+    void node.getBoundingClientRect();  // force reflow so the animation restarts
+    node.classList.add('flash');
+  });
+}
 
 // ---- secrets ----
 let secretMode = 'add';   // 'add' | 'edit'
@@ -1280,6 +1439,10 @@ $('#bReset').onclick = () => { bView = { scaleH: 1, rangeH: 24 }; bOnKind = new 
 $('#bJump').onclick = () => { bPinned = true; bRender(); };
 window.addEventListener('resize', () => {
   if ($('#tab-board').classList.contains('active')) bRender();
+  if ($('#tab-log').classList.contains('active')) {
+    clearTimeout(topoResizeT);
+    topoResizeT = setTimeout(topoRelayout, 150);
+  }
 });
 (() => {
   const wrap = $('#boardWrap');
@@ -1307,6 +1470,7 @@ window.addEventListener('resize', () => {
 
 async function loadWorkers() {
   const ws = await api('/api/v1/workers');
+  topoSync(ws);
   $('#workerrows').innerHTML = '';
   (ws || []).forEach(w => {
     const c = w.context || {};
@@ -1575,6 +1739,7 @@ $('#planModal').addEventListener('click', (ev) => {
   ensureRoutesPoll();
   ensureBoardPoll();
   ensureBoardClock();
+  ensureTopoPoll();
   activateTab(tabFromHash() || 'board');
   setInterval(() => {
     loadPlanning().catch(() => {});
