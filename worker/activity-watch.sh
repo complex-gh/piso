@@ -23,11 +23,11 @@ if [ -z "$gw" ] || [ -z "$worker" ] || [ -z "$slug" ]; then
   exit 3
 fi
 
-BEAT_SECS=15             # active beat at most every 15 s. The board merges
-                         # same-kind events ≤ 3 min (MERGE_MS), so more frequent
-                         # beats do NOT add rows — they keep the track's live
-                         # marker and idle detection fresh (stale in ~15 s
-                         # instead of ~1 min). Eager, not verbose.
+BEAT_SECS=30             # active span refresh at most every 30 s: each beat
+                         # upserts a SINGLE live row per worker (purge + post),
+                         # so the store/feed never flood — and the board's live
+                         # marker stays fresh. The row's text embeds the elapsed
+                         # span ("working on … · for 13 min").
 RESCAN_SECS=3            # check for session boundary/beat every 3 s
 GIT=(git -c safe.directory=*)
 
@@ -197,6 +197,17 @@ drain_spool() {
   rm -f "$SPOOL.drain"
 }
 
+# purge_own_active deletes the worker's previous heartbeat rows so the store
+# holds at most one live active row per worker (delete-all-then-insert
+# upsert). Best effort; the legacy per-beat flood dies on the first beat after
+# an upgrade. 204 on success, and 404/… on a miss are all no-ops here.
+purge_own_active() {
+  curl -sS --max-time 3 -o /dev/null \
+    -X POST "${gw}/api/v1/worker/activity/revoke" \
+    -H 'Content-Type: application/json' \
+    -d "{\"worker\":\"$(san "$worker")\",\"allActive\":true}" || true
+}
+
 # post sends one activity; true iff accepted NOW. Durable kinds (notes, and
 # the informant's semantic events via the spool) are buffered on failure so a
 # gateway blip cannot lose them. Ephemeral "active" beats are never spooled:
@@ -234,6 +245,8 @@ PY
 
 last_beat=0
 last_state=""   # "up" | "down"
+span_start=0     # epoch secs when the current working span began
+last_ctx=""      # context (repo · branch @commit) the span is labeled with
 while true; do
   drain_spool
   now=$(date +%s 2>/dev/null) || now=0
@@ -252,12 +265,16 @@ while true; do
     # Advance regardless of delivery: a failed note was spooled (retained), so
     # the boundary is recorded and the live loop must not re-fire it.
     last_state="$state"
-    last_beat=0   # force a fresh active beat after a boundary
+    last_beat=0        # force a fresh active beat after a boundary
+    span_start=0       # a fresh working span (next beat re-labels it)
+    last_ctx=""
   fi
 
   # alive beat — the board's live marker. Fire when there is recent session-file
   # activity (model/tool exchange) OR a tool child is still running, so an idle
-  # attached pi does not keep the board "live".
+  # attached pi does not keep the board "live". Each beat UPSERTS one row per
+  # worker (purge own actives, then post), with the running span length in the
+  # text — so the feed never floods and the monitor sees at most one active span.
   recent=$(session_recency); recent=${recent:-0}
   jsonl_fresh=0
   if [ "$recent" -ge $((now - 20)) ]; then jsonl_fresh=1; fi
@@ -267,7 +284,20 @@ while true; do
   fi
   if [ "$working" = "1" ] && [ $((now - last_beat)) -ge "$BEAT_SECS" ]; then
     ctx="$(proj_ctx)"
-    if post "active" "working on ${ctx:-unknown}"; then
+    if [ "$ctx" != "$last_ctx" ]; then
+      last_ctx="$ctx"   # new context (repo/branch/commit): new span
+      span_start=$now
+    fi
+    span_min=0
+    if [ "$span_start" -gt 0 ] && [ "$now" -ge $((span_start + 60)) ]; then
+      span_min=$(((now - span_start) / 60))
+    fi
+    text="working on ${ctx:-unknown}"
+    if [ "$span_min" -ge 1 ]; then
+      text="${text} · for ${span_min} min"
+    fi
+    purge_own_active
+    if post "active" "$text"; then
       last_beat=$now
     fi
   fi

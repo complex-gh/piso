@@ -91,6 +91,8 @@ if not isinstance(rows, list):
     sys.exit(0)
 rows = [a for a in rows[:limit] if isinstance(a, dict)]
 
+now_s = time.time()
+
 def fmt_ts(v):
     # activity ts is unix millis (int); tolerate ISO strings too
     if isinstance(v, (int, float)):
@@ -98,25 +100,74 @@ def fmt_ts(v):
         v = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ms / 1000))
     return str(v)[:19]
 
-by, order = {}, []
+def age_label(a):
+    # prefer the server-computed label (one consistent `now` for the whole
+    # feed); fall back to computing here only if the gateway is older.
+    lab = a.get("ageLabel")
+    if isinstance(lab, str) and lab:
+        return lab
+    v = a.get("ts")
+    if not isinstance(v, (int, float)):
+        return ""
+    ms = v if v > 10_000_000_000 else v * 1000
+    sec = now_s - ms / 1000
+    if sec < 90:
+        return "just now"
+    m = int(sec // 60)
+    if m < 60:
+        return f"{m} min ago"
+    h = m // 60
+    if h < 24:
+        r = m % 60
+        return f"{h} h ago" if r == 0 else f"{h} h {r} min ago"
+    return f"{h // 24} d ago"
+
+def base(v):
+    # strip the "· for N min" duration suffix so span rows group by context
+    return v.rsplit(" · for ", 1)[0]
+
+def ms(v):
+    return v if v > 10_000_000_000 else v * 1000
+
+groups, order = {}, []
 for a in rows:
     s = a.get("slug") or "?"
-    if s not in by:
-        by[s] = []
+    if s not in groups:
+        groups[s] = []
         order.append(s)
-    by[s].append(a)
-order.sort(key=lambda s: -len(by[s]))
-print(f"  activities : {len(rows)} rows")
-print(f"  by project : " + " · ".join(f"{s}={len(by[s])}" for s in order))
+    groups[s].append(a)
+order.sort(key=lambda s: -len(groups[s]))
+print(f"  activities : {len(rows)} rows" + (f" (capped at {limit})" if len(rows) >= limit else ""))
+print(f"  by project : " + " · ".join(f"{s}={len(groups[s])}" for s in order))
 for s in order:
-    print(f"  [{s}] ({len(by[s])})")
-    for a in by[s]:
-        kind = (a.get("kind") or "?").ljust(10)
-        tgt = ""
-        if a.get("targetSlug"):
-            tgt = (">" + str(a["targetSlug"])).ljust(12)
-        text = str(a.get("text") or "").replace("\n", " ")[:140]
-        print(f"    {fmt_ts(a.get('ts'))}  {kind} {tgt} {text}")
+    print(f"  [{s}] ({len(groups[s])})")
+    chrono = list(reversed(groups[s]))  # rows arrive newest-first
+    i = 0
+    while i < len(chrono):
+        a = chrono[i]
+        kind = a.get("kind") or "?"
+        txt = str(a.get("text") or "").replace("\n", " ")[:140]
+        if kind != "active":
+            tgt = (" >" + str(a["targetSlug"])) if a.get("targetSlug") else ""
+            print(f"    {kind.ljust(10)}{tgt.ljust(12)}{fmt_ts(a.get('ts'))}  ({age_label(a)})  {txt}")
+            i += 1
+            continue
+        # collapse a consecutive run of active rows with the same context into
+        # one span line (the watcher now upserts, so this mostly compresses
+        # legacy per-beat rows still in the window)
+        btxt = base(txt)
+        j = i
+        while j + 1 < len(chrono) and chrono[j + 1].get("kind") == "active" and base(str(chrono[j + 1].get("text") or "").replace("\n", " ")[:140]) == btxt:
+            j += 1
+        run = chrono[i:j + 1]
+        t0, t1 = run[0].get("ts"), run[-1].get("ts")
+        if len(run) > 1 and isinstance(t0, (int, float)) and isinstance(t1, (int, float)):
+            span = f" span {time.strftime('%H:%M', time.gmtime(ms(t0)/1000))}-{time.strftime('%H:%M', time.gmtime(ms(t1)/1000))}"
+            span += f" ({max(1, int((ms(t1)-ms(t0))/60000))} min)"
+            print(f"    active{span.ljust(24)} x{len(run)}  {btxt}  ({age_label(run[-1])})")
+        else:
+            print(f"    active      {fmt_ts(run[0].get('ts'))}  ({age_label(run[0])})  {txt}")
+        i = j + 1
 PY
 }
 

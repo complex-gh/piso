@@ -747,11 +747,16 @@ func (s *Store) SetRouteDisabled(id string, disabled bool) (RouteRec, error) {
 }
 
 // SetWorkerUnreachable replaces the transient listener hints for a worker
-// (the watcher posts the full set each time, so: wholesale replace).
+// (the watcher posts the full set each time, so: wholesale replace). Passing
+// nil clears the entry so WorkerUnreachable reports it absent.
 func (s *Store) SetWorkerUnreachable(worker string, ports []UnreachablePort) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.unreachable[worker] = ports
+	if ports == nil {
+		delete(s.unreachable, worker)
+	} else {
+		s.unreachable[worker] = ports
+	}
 }
 
 // WorkerUnreachable returns the transient listener hints for a worker.

@@ -105,8 +105,9 @@ func (s *Store) Close() error {
 }
 
 // InsertActivity stores one activity and broadcasts it to SSE subscribers.
-// Ts/ID/Kind defaults are filled when absent.
-func (s *Store) InsertActivity(a Activity) error {
+// Ts/ID/Kind defaults are filled when absent. Returns the stored row (with
+// its server-assigned ID) so callers can hand it back (e.g. the POST response).
+func (s *Store) InsertActivity(a Activity) (Activity, error) {
 	if a.ID == "" {
 		a.ID = "act_" + randID()
 	}
@@ -117,17 +118,17 @@ func (s *Store) InsertActivity(a Activity) error {
 		a.Kind = ActivityKindNote
 	}
 	if !ValidActivityKind(a.Kind) {
-		return fmt.Errorf("unknown activity kind %q", a.Kind)
+		return Activity{}, fmt.Errorf("unknown activity kind %q", a.Kind)
 	}
 	_, err := s.activitiesDB.Exec(
 		`INSERT INTO activities (id, worker, slug, kind, target_slug, text, ts) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Worker, a.Slug, a.Kind, a.TargetSlug, a.Text, a.Ts,
 	)
 	if err != nil {
-		return err
+		return Activity{}, err
 	}
 	s.broadcastActivity(a)
-	return nil
+	return a, nil
 }
 
 // QueryActivities returns activities matching f, newest first, limited by
@@ -186,6 +187,21 @@ func (s *Store) DeleteOwnActivity(id, worker string) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// DeleteOwnActive removes every kind=active row the worker posted (prior
+// heartbeat spans). The watcher calls it before each new beat so the store
+// holds at most one live active row per worker, and the first beat after an
+// upgrade purges any legacy per-beat flood. Returns the number of rows
+// deleted.
+func (s *Store) DeleteOwnActive(worker string) (int64, error) {
+	res, err := s.activitiesDB.Exec(
+		`DELETE FROM activities WHERE worker = ? AND kind = ?`, worker, ActivityKindActive,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // broadcastActivity notifies SSE subscribers of a new activity. Same

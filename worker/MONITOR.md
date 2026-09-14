@@ -13,8 +13,15 @@ The gateway's activity store, via the worker API (you are `piso-worker-monitor`)
 - `GET http://gateway:8083/api/v1/worker/activities?worker=piso-worker-monitor`
   returns every project's activities: `{id, worker, slug, kind, targetSlug,
   text, ts}`. Kinds: `progress`, `milestone`, `reminder`, `poke`, `active`,
-  `waiting`, `note`. `slug` is the source project; `targetSlug` is who a poke is aimed at.
+  `waiting`, `host`, `note`. `slug` is the source project; `targetSlug` is who a poke is aimed at.
   `waiting` is Tier B only: the agent said the run needs the human's next input.
+- Every row already carries **`ageMin`** (whole minutes since the event) and
+  **`ageLabel`** ("13 min ago") — computed gateway-side against one consistent
+  clock. Never convert timestamps yourself; judge on `ageMin`.
+- `active` is ONE live row per worker (the watcher upserts it in place): its
+  text embeds the running span, e.g. "working on workspace · master @b98d3c6 ·
+  for 13 min". A fresh `ageMin` means the human is mid-session; an old one means
+  work stopped at that span.
 - `GET http://gateway:8083/api/v1/worker/activities?worker=piso-worker-monitor&slug=<proj>`
   filters to one project.
 
@@ -40,8 +47,8 @@ A poke is warranted ONLY when ALL hold:
 
 1. **At least 10 minutes have passed** since the project's last meaningful
    event (`waiting`, `poke` from the worker, `progress`, `active`, or
-   `session started/ended`). Read `ts`. If the newest of those is younger
-   than 10 minutes, stay silent — the human may still be in the session.
+   `session started/ended`). Read `ageMin`: if the newest meaningful row has
+   `ageMin < 10`, stay silent — the human may still be in the session.
 2. **The project is still waiting on the human or has gone dark**, evidenced
    by: a `waiting` (or worker `poke` blocker) with no later `active` /
    `progress` / `session started`, OR ≥ 10 minutes of silence after work.
@@ -74,7 +81,7 @@ paragraphs:
 wake=YYYY-MM-DDTHH:MM:SSZ
 feed_rows=N
 projects=piso,another
-candidate=slug=piso last_event=14:02:11Z last_kind=progress age_min=58 eligible=yes
+candidate=slug=piso last_event=14:02:11Z last_kind=progress ageMin=58 eligible=yes
 candidate=slug=another last_event=09:58:03Z last_kind=active age_min=240 eligible=yes
 emission=record|none
 emission=poke target=piso text="Project X: 12m waiting after 'Need you to pick the auth approach'; no progress since 14:02"

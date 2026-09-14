@@ -243,11 +243,12 @@ func (s *Server) handleWorkerPostActivity(w http.ResponseWriter, r *http.Request
 		TargetSlug: sanitizeLabel(in.TargetSlug, 63),
 		Text:       sanitizeLabel(in.Text, 500),
 	}
-	if err := s.Store.InsertActivity(a); err != nil {
+	stored, err := s.Store.InsertActivity(a)
+	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, 201, a)
+	writeJSON(w, 201, stored)
 }
 
 // handleWorkerCapabilities reports the worker's LIVE sandbox boundaries that
@@ -291,6 +292,50 @@ func (s *Server) handleWorkerCapabilities(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// activityView is one feed row as the monitor/loop consume it: the stored
+// activity plus read-time age fields, so judging never requires timestamp
+// arithmetic. All rows of one response share the same `now`.
+type activityView struct {
+	store.Activity
+	AgeMin   int    `json:"ageMin"`
+	AgeLabel string `json:"ageLabel"`
+}
+
+// activityAge renders the age of tsMs against nowMs ("just now", "N min ago",
+// "N h M min ago", "Nd ago") plus the floor of elapsed minutes.
+func activityAge(tsMs, nowMs int64) (int, string) {
+	if nowMs <= tsMs {
+		return 0, "just now"
+	}
+	sec := (nowMs - tsMs) / 1000
+	if sec < 90 {
+		return 0, "just now"
+	}
+	min := sec / 60
+	if min < 60 {
+		return int(min), fmt.Sprintf("%d min ago", min)
+	}
+	h := min / 60
+	if h < 24 {
+		r := min % 60
+		if r != 0 {
+			return int(min), fmt.Sprintf("%d h %d min ago", h, r)
+		}
+		return int(min), fmt.Sprintf("%d h ago", h)
+	}
+	return int(min), fmt.Sprintf("%dd ago", h / 24)
+}
+
+// feedView attaches the age fields to one feed read.
+func feedView(rows []store.Activity, nowMs int64) []activityView {
+	var out []activityView
+	for _, a := range rows {
+		m, lab := activityAge(a.Ts, nowMs)
+		out = append(out, activityView{Activity: a, AgeMin: m, AgeLabel: lab})
+	}
+	return out
+}
+
 // handleWorkerGetActivities returns the activity feed. The monitor polls this;
 // any registered worker may read the whole feed (it is scrubbed: sanitized
 // text only). Caller identity is verified like the ports handler.
@@ -317,15 +362,19 @@ func (s *Server) handleWorkerGetActivities(w http.ResponseWriter, r *http.Reques
 	if acts == nil {
 		acts = []store.Activity{}
 	}
-	writeJSON(w, 200, acts)
+	writeJSON(w, 200, feedView(acts, time.Now().UnixNano()/1000000))
 }
 
 // handleWorkerRevokeActivity removes one of the caller's own activity rows
-// (id is scoped to the posting worker).
+// (id is scoped to the posting worker), or — with {"allActive": true} — purges
+// every one of the caller's heartbeat (kind=active) rows. The watcher uses
+// the purge as an idempotent upsert so the store holds at most one live
+// active row per worker.
 func (s *Server) handleWorkerRevokeActivity(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID     string `json:"id"`
-		Worker string `json:"worker"`
+		ID        string `json:"id"`
+		Worker    string `json:"worker"`
+		AllActive bool   `json:"allActive,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "bad json"})
@@ -333,12 +382,25 @@ func (s *Server) handleWorkerRevokeActivity(w http.ResponseWriter, r *http.Reque
 	}
 	in.ID = strings.TrimSpace(in.ID)
 	in.Worker = strings.TrimSpace(in.Worker)
-	if in.ID == "" || !workerNameRe.MatchString(in.Worker) {
-		writeJSON(w, 400, map[string]string{"error": "id and worker required"})
+	if !workerNameRe.MatchString(in.Worker) {
+		writeJSON(w, 400, map[string]string{"error": "worker required"})
+		return
+	}
+	if in.ID == "" && !in.AllActive {
+		writeJSON(w, 400, map[string]string{"error": "id (or allActive) required"})
 		return
 	}
 	if reg, ok := s.Store.WorkerByIP(requestIP(r)); ok && reg.Name != in.Worker {
 		identityMismatch(w, r, reg, in.Worker, "")
+		return
+	}
+	if in.AllActive {
+		// Idempotent purge: deleting zero rows is not an error here.
+		if _, err := s.Store.DeleteOwnActive(in.Worker); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		w.WriteHeader(204)
 		return
 	}
 	deleted, err := s.Store.DeleteOwnActivity(in.ID, in.Worker)
