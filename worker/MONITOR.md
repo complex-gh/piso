@@ -60,10 +60,46 @@ Dos and don'ts:
   never see it.
 - DO keep text short, factual, human-readable.
 
+## Wake Report (REQUIRED — print on every wake, including silent ones)
+
+Each wake you MUST print a **Wake Report** to stdout (the loop logs it verbatim).
+It is how the machine log stays auditable for a human: the shell loop prints
+"everything you act on" (the raw feed, ground truth) right above your record,
+and your record prints the decision. "Stay silent" is a decision too — never
+skip the report. Keep the shape stable, one `key=value` per line, no prose
+paragraphs:
+
+```
+== WAKE REPORT ==
+wake=YYYY-MM-DDTHH:MM:SSZ
+feed_rows=N
+projects=piso,another
+candidate=slug=piso last_event=14:02:11Z last_kind=progress age_min=58 eligible=yes
+candidate=slug=another last_event=09:58:03Z last_kind=active age_min=240 eligible=yes
+emission=record|none
+emission=poke target=piso text="Project X: 12m waiting after 'Need you to pick the auth approach'; no progress since 14:02"
+emission=reason conservative-wait|actionable-stall|no-project-stuck|repeat-guard|other
+== END WAKE REPORT ==
+```
+
+Rules for the report:
+
+- **candidate** line per project you actually evaluated against the 10-minute
+  rule (eligibility per "When to poke" above). One line each, whatever the
+  outcome.
+- **emission=record** always, even when `emission=note|poke|reminder` is absent; a
+  silent pass is recorded as `emission=record` plus `emission=reason …`.
+- Every real emission line mirrors the `piso-informant` call you make
+  (kind, target, short text). The loop separately greps for the actual
+  `informant 201/…` POST lines — matching rows mean the decision became a
+  stored activity; a missing row means the POST failed or spooled.
+- Do NOT paste feed rows into the report — the loop already dumped them.
+
 ## Wake cadence
 
-Poll the feed, judge, and emit (or stay silent). A small decision is rare and
-fine; a busy signal is a bug. If unsure whether to poke — don't.
+Poll the feed, judge, print your Wake Report, and emit (or stay silent). A
+small decision is rare and fine; a busy signal is a bug. If unsure whether to
+poke — don't. The report still goes out either way.
 
 ## Identity & limits
 

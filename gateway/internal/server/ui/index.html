@@ -1287,7 +1287,10 @@ function bBuildFilters() {
     lab.append(cb, sw, ' ' + k); kb.append(lab);
   });
   const pb = $('#bProjectFilters'); pb.innerHTML = '';
-  const slugs = [...new Set(bActs.map(a => a.slug).filter(s => s && s !== 'monitor'))].sort();
+  // Track slugs are the same mapping bRender uses (targetSlug wins over the
+  // source slug), so monitor-targeted tracks are filterable too.
+  const trackOf = a => (a.targetSlug && a.targetSlug !== a.slug) ? a.targetSlug : a.slug;
+  const slugs = [...new Set(bActs.map(trackOf).filter(s => s && s !== 'monitor'))].sort();
   if (slugs.length <= 1) { pb.style.display = 'none'; return; }
   pb.style.display = '';
   const mk = (name, on) => {
@@ -1327,7 +1330,8 @@ function bRender() {
   let count = 0;
   bActs.forEach(a => {
     if (!bOnKind.has(a.kind)) return;
-    if (a.slug === 'monitor') return;
+    // Monitor-sourced events carry targetSlug and render on the target
+    // project's track; they never become their own track.
     const t = (a.targetSlug && a.targetSlug !== a.slug) ? a.targetSlug : a.slug;
     if (t === 'monitor') return;
     if (bOnSlug && !bOnSlug.has(t)) return;

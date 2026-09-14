@@ -23,8 +23,12 @@ if [ -z "$gw" ] || [ -z "$worker" ] || [ -z "$slug" ]; then
   exit 3
 fi
 
-BEAT_SECS=60             # active beat at most every 1 min (board merges ≤ 3 min)
-RESCAN_SECS=5            # check for session boundary every 5 s
+BEAT_SECS=15             # active beat at most every 15 s. The board merges
+                         # same-kind events ≤ 3 min (MERGE_MS), so more frequent
+                         # beats do NOT add rows — they keep the track's live
+                         # marker and idle detection fresh (stale in ~15 s
+                         # instead of ~1 min). Eager, not verbose.
+RESCAN_SECS=3            # check for session boundary/beat every 3 s
 GIT=(git -c safe.directory=*)
 
 san() {
