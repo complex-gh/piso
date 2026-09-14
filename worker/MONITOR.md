@@ -21,7 +21,8 @@ The gateway's activity store, via the worker API (you are `piso-worker-monitor`)
 - `active` is ONE live row per worker (the watcher upserts it in place): its
   text embeds the running span, e.g. "working on workspace · master @b98d3c6 ·
   for 13 min". A fresh `ageMin` means the human is mid-session; an old one means
-  work stopped at that span.
+  work stopped at that span. (Digest span lines break at >10-min gaps — a long
+  "span" across a dark stretch means sparse beats, not continuous work.)
 - `GET http://gateway:8083/api/v1/worker/activities?worker=piso-worker-monitor&slug=<proj>`
   filters to one project.
 

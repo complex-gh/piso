@@ -149,15 +149,23 @@ for s in order:
         txt = str(a.get("text") or "").replace("\n", " ")[:140]
         if kind != "active":
             tgt = (" >" + str(a["targetSlug"])) if a.get("targetSlug") else ""
-            print(f"    {kind.ljust(10)}{tgt.ljust(12)}{fmt_ts(a.get('ts'))}  ({age_label(a)})  {txt}")
+            print(f"    {kind.ljust(10)}{tgt.ljust(12)} {fmt_ts(a.get('ts'))}  ({age_label(a)})  {txt}")
             i += 1
             continue
         # collapse a consecutive run of active rows with the same context into
         # one span line (the watcher now upserts, so this mostly compresses
-        # legacy per-beat rows still in the window)
+        # legacy per-beat rows still in the window). A run BREAKS on a gap of
+        # more than 10 min between beats: merging sparse heartbeats across a
+        # dark stretch would fake a "20 h span" out of noise.
+        GAP_MAX_MS = 10 * 60 * 1000
         btxt = base(txt)
         j = i
-        while j + 1 < len(chrono) and chrono[j + 1].get("kind") == "active" and base(str(chrono[j + 1].get("text") or "").replace("\n", " ")[:140]) == btxt:
+        while j + 1 < len(chrono) and chrono[j + 1].get("kind") == "active":
+            t_j, t_n = chrono[j].get("ts"), chrono[j + 1].get("ts")
+            if isinstance(t_j, (int, float)) and isinstance(t_n, (int, float)) and (ms(t_n) - ms(t_j)) > GAP_MAX_MS:
+                break
+            if base(str(chrono[j + 1].get("text") or "").replace("\n", " ")[:140]) != btxt:
+                break
             j += 1
         run = chrono[i:j + 1]
         t0, t1 = run[0].get("ts"), run[-1].get("ts")
