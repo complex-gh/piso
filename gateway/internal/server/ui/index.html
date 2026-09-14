@@ -974,9 +974,10 @@ async function loadRoutes() {
     const url = routeURL(r.name);
     const origin = r.origin === 'auto'
       ? `<span class="badge" style="background:rgba(79,140,255,.12);color:var(--accent)">auto</span>`
-      : (r.origin === 'expose' ? '<span class="badge ok">expose</span>' : '');
+      : (r.origin === 'plan' ? '<span class="badge" style="background:rgba(180,120,255,.14);color:#c9a6ff">plan</span>'
+        : (r.origin === 'expose' ? '<span class="badge ok">expose</span>' : ''));
     let state = '';
-    if (r.origin === 'auto' && !r.disabled) {
+    if ((r.origin === 'auto' || r.origin === 'plan') && !r.disabled) {
       const age = r.lastSeenMs ? Date.now() - r.lastSeenMs : Infinity;
       state = age > 45000 ? ' <span class="badge block">down</span>' : ' <span class="badge ok">live</span>';
     }
@@ -986,7 +987,8 @@ async function loadRoutes() {
     <td class="mono">${esc(r.worker)}</td><td>${r.port}</td>
     <td><button class="btn small" onclick="window.open('${esc(url)}','_blank')">open</button>
     <label class="toggle" title="block / allow this route"><input type="checkbox" ${!r.disabled?'checked':''}
-      onchange="setRouteDisabled('${r.id}', !this.checked)"><span></span></label></td>`));
+      onchange="setRouteDisabled('${r.id}', !this.checked)"><span></span></label>
+    <button class="btn small danger" onclick="delRoute('${r.id}','${esc(r.name)}')">del</button></td>`));
   });
 }
 
@@ -994,6 +996,16 @@ async function loadRoutes() {
 async function setRouteDisabled(id, disabled) {
   try {
     await api(`/api/v1/routes/${id}/disabled`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({disabled})});
+  } catch (e) { alert(e.message); }
+  loadRoutes();
+}
+
+// delRoute permanently removes a route (auto/plan/expose alike). The gateway
+// broadcasts the deletion, so `piso sync --watch` drops the /etc/hosts entry.
+async function delRoute(id, name) {
+  if (!confirm('Delete route ' + name + '?')) return;
+  try {
+    await api(`/api/v1/routes/${id}`, {method:'DELETE'});
   } catch (e) { alert(e.message); }
   loadRoutes();
 }
