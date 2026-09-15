@@ -33,7 +33,8 @@ GATEWAY  piso-gateway (sole egress)
 WORKER  piso-worker-<proj>  — pi on Bun
   ├─ /workspace  ← host project dir (rw, the only host mount)
   ├─ piso-agent  ← named volume for pi sessions (persist across attach)
-  └─ /piso-ca.pem ← gateway CA (ro) so Bun/curl trust the MITM cert
+  └─ /piso-ca.pem ← gateway CA (ro); SSL_CERT_FILE / GIT_SSL_CAINFO / NODE_EXTRA_CA_CERTS
+       point here. Rootfs is read-only, so the system trust store is never updated.
 ```
 
 Docker network `piso_vpc` is **`internal: true`**. Docker drops traffic forwarded off that bridge, so the worker has no path to the internet, LAN, or IMDS except the gateway (which is also on `piso_egress`, a normal NAT network). Masquerade is also disabled as belt-and-suspenders. This flag is the enforcement point — without it the whole design is advisory. Compose will not flip `Internal` on an already-created network; `piso up` tears down a leaky `piso_vpc` and recreates it.
