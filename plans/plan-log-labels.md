@@ -37,7 +37,7 @@ worker: context-watch.sh (in-container, ~1s poll, no docker on host)
 
 `AppendLog` looks up the worker's current context by `rec.Slug` and fills
 `Record.Project/Branch/Commit/Model`. This is the single choke point — every
-path that logs (CONNECT internal block, internet-kill-switch block, block /
+path that logs (SNI intercept internal block, internet-kill-switch block, block /
 substitute / allow, 502, replay) gets labels for free, history stays stable
 (branch at the time of the request), and filtering/JSONL/SSE all work on the
 persisted shape. Cost: labels lag reality by ≤~1–2 s (poll interval) around a

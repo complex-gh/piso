@@ -22,7 +22,7 @@ func passthroughHandler(t *testing.T) (*Handler, *store.Store) {
 
 func TestHostNeedsInterceptionEmptyStore(t *testing.T) {
 	h, _ := passthroughHandler(t)
-	if h.hostNeedsInterception("github.com") {
+	if h.hostNeedsInterception("code.example.com") {
 		t.Fatal("empty store must not require interception")
 	}
 }
@@ -30,11 +30,11 @@ func TestHostNeedsInterceptionEmptyStore(t *testing.T) {
 func TestHostNeedsInterceptionByRuleHost(t *testing.T) {
 	h, st := passthroughHandler(t)
 	if err := st.AddRule(store.RuleRec{
-		ID: "r1", SecretID: "s1", Host: "github.com", Placeholder: "piso_gh_x",
+		ID: "r1", SecretID: "s1", Host: "code.example.com", Placeholder: "piso_gh_x",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !h.hostNeedsInterception("github.com") {
+	if !h.hostNeedsInterception("code.example.com") {
 		t.Fatal("host with a rule must be intercepted")
 	}
 	if h.hostNeedsInterception("npmjs.org") {

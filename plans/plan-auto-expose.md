@@ -6,7 +6,7 @@ Today `piso expose <port> --name n` is manual: a host runs it once per server, i
 POSTs a route row and appends one `/etc/hosts` line. Goal: **any** server on
 **any** port in **any** worker gets a `<label>.piso.local` subdomain on the host
 with no per-server ceremony, for any number of workers and servers — while the
-host port map stays fixed (proxy / control / ingress = 8080 / 80 / 8082).
+host port map stays fixed (control / ingress = 80 / 8082).
 
 The architecture already makes this free, unblocked by two gaps:
 

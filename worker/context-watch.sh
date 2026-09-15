@@ -5,8 +5,7 @@
 #
 # Design notes
 # - Same pattern as piso-planning-watch: in-container loop, POST on change,
-#   talks to the worker API (GATEWAY_URL, :8083), never the host control
-#   plane or the MITM proxy. NO_PROXY covers "gateway" so curl goes direct.
+#   talks to the worker API (GATEWAY_URL, :8083), never the host control plane.
 # - Labels describe the worker at that moment (advisory only). Snapshotting
 #   happens gateway-side in AppendLog so each log row is stable.
 # - The image has no ps/pgrep; live pi processes are found with a python3

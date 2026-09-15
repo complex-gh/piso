@@ -75,7 +75,7 @@ func clientHelloRecord(sni string) []byte {
 // --- tests ------------------------------------------------------------------
 
 func TestReadClientHelloSNIWithSNI(t *testing.T) {
-	hello := clientHelloRecord("github.com")
+	hello := clientHelloRecord("code.example.com")
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -90,8 +90,8 @@ func TestReadClientHelloSNIWithSNI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readClientHelloSNI: %v", err)
 	}
-	if sni != "github.com" {
-		t.Fatalf("want SNI github.com, got %q", sni)
+	if sni != "code.example.com" {
+		t.Fatalf("want SNI code.example.com, got %q", sni)
 	}
 	if len(got) != len(hello) || strings.Compare(string(got), string(hello)) != 0 {
 		t.Fatalf("replayed record mismatch: %d bytes vs %d", len(got), len(hello))

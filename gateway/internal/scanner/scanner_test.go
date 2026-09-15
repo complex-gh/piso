@@ -50,7 +50,7 @@ func TestBasicAuthPlaceholderDecoded(t *testing.T) {
 	const ph = "piso_gh_5ef1739b3cf1"
 	payload := "NicholasPiano:" + ph
 	b64 := base64.StdEncoding.EncodeToString([]byte(payload))
-	req := newReq(t, "GET", "https://github.com/o/r.git/info/refs?service=git-upload-pack", "", map[string]string{
+	req := newReq(t, "GET", "https://git.example.com/o/r.git/info/refs?service=git-upload-pack", "", map[string]string{
 		"Authorization": "Basic " + b64,
 	})
 	res := ScanRequest(req, Options{Patterns: testPatterns(t)})
@@ -73,7 +73,7 @@ func TestBasicAuthRealTokenStillCredential(t *testing.T) {
 	// raw basic-auth pattern hit stands → still looks like a credential.
 	payload := "NicholasPiano:sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX"
 	b64 := base64.StdEncoding.EncodeToString([]byte(payload))
-	req := newReq(t, "GET", "https://github.com/o/r.git/info/refs", "", map[string]string{
+	req := newReq(t, "GET", "https://git.example.com/o/r.git/info/refs", "", map[string]string{
 		"Authorization": "Basic " + b64,
 	})
 	res := ScanRequest(req, Options{Patterns: testPatterns(t)})

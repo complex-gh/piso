@@ -283,12 +283,14 @@ func (s *Server) handleWorkerCapabilities(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, 200, map[string]any{
-		"worker": worker,
-		"slug": slug,
-		"internetEnabled": internet,
-		"egressProxy": "gateway:8080",
+		"worker":             worker,
+		"slug":               slug,
+		"internetEnabled":    internet,
+		"egress":             "transparent",
+		"intercept":          "tcp/443",
+		"workerAPI":          "http://gateway:8083",
 		"scopedPlaceholders": scoped,
-		"outOfBound": "emit a host activity request instead of attempting",
+		"outOfBound":         "emit a host activity request instead of attempting",
 	})
 }
 
@@ -323,7 +325,7 @@ func activityAge(tsMs, nowMs int64) (int, string) {
 		}
 		return int(min), fmt.Sprintf("%d h ago", h)
 	}
-	return int(min), fmt.Sprintf("%dd ago", h / 24)
+	return int(min), fmt.Sprintf("%dd ago", h/24)
 }
 
 // feedView attaches the age fields to one feed read.
@@ -451,9 +453,9 @@ func (s *Server) handleWorkerGetActivities(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	f := store.ActivityFilter{
-		Kind:    strings.TrimSpace(r.URL.Query().Get("kind")),
-		Slug:    strings.TrimSpace(r.URL.Query().Get("slug")),
-		Limit:   atoiDefault(r.URL.Query().Get("limit"), 500),
+		Kind:  strings.TrimSpace(r.URL.Query().Get("kind")),
+		Slug:  strings.TrimSpace(r.URL.Query().Get("slug")),
+		Limit: atoiDefault(r.URL.Query().Get("limit"), 500),
 	}
 	// Explicit `since` (unix ms) overrides the derived judgement window.
 	explicitSince := ""

@@ -28,7 +28,7 @@ func TestApplySubstitutionRewritesBasicAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	b64 := base64.StdEncoding.EncodeToString([]byte("NicholasPiano:" + ph))
-	req, err := http.NewRequest("GET", "https://github.com/NicholasPiano/o.git/info/refs?service=git-upload-pack", nil)
+	req, err := http.NewRequest("GET", "https://git.example.com/NicholasPiano/o.git/info/refs?service=git-upload-pack", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestApplySubstitutionPreservesPktBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := []byte("0014command=ls-refs\n0014agent=git/2.39.5\n0000")
-	req, err := http.NewRequest("POST", "https://github.com/NicholasPiano/o.git/git-upload-pack", nil)
+	req, err := http.NewRequest("POST", "https://git.example.com/NicholasPiano/o.git/git-upload-pack", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

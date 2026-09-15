@@ -1,12 +1,7 @@
-# piso worker — the AI agent's home. Runs pi (on Bun) with egress ONLY through
-# the gateway (compose sets HTTPS_PROXY; piso_vpc is a Docker internal network).
+# piso worker — the AI agent's home. Runs pi (on Bun).
 # The gateway's CA is injected read-only by compose and installed into the
-# system trust store by entrypoint.sh so everything (curl/git/node/bun) accepts
-# the MITM cert.
-#
-# WHY BUN: pi's CLI is a node shebang, but Node's fetch (undici) does NOT honor
-# HTTPS_PROXY. Bun's native fetch does (verified empirically). Running pi under
-# Bun makes ALL of pi's model traffic route through the gateway.
+# system trust store by entrypoint.sh so MITM'd (ruled) TLS verifies.
+# Unruled :443 is spliced with real origin certs.
 #
 # Hardening: read-only rootfs, dropped caps, no-new-privileges, init — applied
 # in compose, not here.
@@ -34,8 +29,7 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PISO_PI_VE
 # Host pi extensions. Installed here (Docker build has real network) into
 # /opt/piso/npm — NOT /root/.pi/agent, which a volume hides at runtime.
 # entrypoint.sh copies this tree into the agent volume when the stamp differs.
-# Must run BEFORE HTTPS_PROXY=gateway or `docker build` npm would target
-# a proxy that does not exist yet.
+# Image build has real network (compose build network: host).
 COPY package.json /opt/piso/npm/package.json
 # --ignore-scripts skips postinstall downloads (pi-browser Chromium, etc.)
 # that hang `docker build`. node-pty still needs a compile.
@@ -77,9 +71,7 @@ RUN NODEVER="$(node -v | tr -d v)" \
 # are not packaged at all. Pin the official static releases instead — the
 # same versions verified against files-widget's exact invocations. Ship
 # both arches since the image builds on arm64 or amd64 hosts.
-# Must run BEFORE HTTPS_PROXY=gateway: `docker build` has real network
-# (compose build network: host) but no `gateway` hostname, so curl would
-# fail with "Could not resolve proxy: gateway".
+# Image build has real network (compose build network: host).
 RUN set -eu; \
   case "$(uname -m)" in \
     aarch64) RUST_ARCH=aarch64-unknown-linux-gnu; GLOW_ARCH=arm64; \
@@ -104,11 +96,8 @@ RUN set -eu; \
   tar xzf glow.tgz --no-same-owner;  install -m 0755 "glow_3.0.0_Linux_${GLOW_ARCH}/glow" /usr/local/bin/glow; \
   rm -rf "$D"
 
-# Egress: only via the gateway. NO_PROXY keeps internal services direct.
-ENV HTTPS_PROXY=http://gateway:8080 \
-    HTTP_PROXY=http://gateway:8080 \
-    NO_PROXY=gateway,localhost,127.0.0.1,*.piso.local \
-    NODE_EXTRA_CA_CERTS=/piso-ca.pem
+# Trust the gateway CA for MITM'd (ruled) TLS. Unruled origins use public CAs.
+ENV NODE_EXTRA_CA_CERTS=/piso-ca.pem
 
 WORKDIR /workspace
 

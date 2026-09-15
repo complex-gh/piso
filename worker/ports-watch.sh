@@ -5,8 +5,7 @@
 # Design notes
 # - Same pattern as piso-planning-watch / piso-context-watch: in-container
 #   loop, POST the FULL listener set on change + on a heartbeat, talks to the
-#   worker API (GATEWAY_URL, :8083) — never the host control plane or the
-#   MITM proxy. NO_PROXY covers "gateway" so curl goes direct.
+#   worker API (GATEWAY_URL, :8083) — never the host control plane.
 # - The image has no ss/iproute2/lsof: listeners come straight from
 #   /proc/net/tcp + /proc/net/tcp6 (kernel truth, zero deps). State 0A is
 #   LISTEN; local_address is big-endian hex ip:port.

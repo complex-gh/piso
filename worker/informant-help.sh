@@ -8,7 +8,7 @@
 #   piso-informant progress  "Started OAuth PKCE flow"
 #   piso-informant milestone "Auth refactor merged"
 #   piso-informant poke      "Blocked: OIDC discovery returns 404" [targetSlug]
-#   piso-informant host      "Clone git@github.com:org/repo.git -> /workspace/repo"
+#   piso-informant host      "Clone git@example.com:org/repo.git -> /workspace/repo"
 #   piso-informant reminder  "Check PR by 5pm"
 #   piso-informant waiting   "Need you to approve the schema"
 #   piso-informant note      "spent the afternoon on the CQRS docs"
@@ -27,7 +27,7 @@
 # (the monitor uses this; a worker poking itself can omit it).
 #
 # Talks to the worker API (GATEWAY_URL, :8083) like the other watchers — never
-# the host control plane. NO_PROXY covers "gateway" so curl goes direct.
+# the host control plane.
 set -u
 
 gw="${GATEWAY_URL:-}"

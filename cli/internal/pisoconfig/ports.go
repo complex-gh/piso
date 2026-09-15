@@ -14,13 +14,11 @@ import (
 )
 
 // Default host-published ports. Control defaults to 80 so the dashboard is
-// http://piso.local (no port). In-container listen ports stay 8080/8081/8082
-// so the worker's HTTP_PROXY=gateway:8080 does not change.
+// http://piso.local (no port). Ingress 8082 is the legacy name.piso.local alias.
+// Egress intercept is vpc-internal (gateway :8084) and is not published.
 const (
-	DefaultProxyPort       = 8080
-	DefaultControlPort     = 80
-	DefaultIngressPort     = 8082
-	DefaultTransparentPort = 8084
+	DefaultControlPort = 80
+	DefaultIngressPort = 8082
 )
 
 // DashboardHost is the browser hostname for the control-plane UI.
@@ -28,15 +26,13 @@ const DashboardHost = "piso.local"
 
 // HostPorts are the localhost publish ports for the gateway.
 type HostPorts struct {
-	Proxy       int `json:"proxyPort"`
-	Control     int `json:"ctrlPort"`
-	Ingress     int `json:"ingressPort"`
-	Transparent int `json:"transparentPort"`
+	Control int `json:"ctrlPort"`
+	Ingress int `json:"ingressPort"`
 }
 
-// DefaultHostPorts returns the built-in 8080/80/8082/8084 mapping.
+// DefaultHostPorts returns the built-in 80/8082 mapping.
 func DefaultHostPorts() HostPorts {
-	return HostPorts{Proxy: DefaultProxyPort, Control: DefaultControlPort, Ingress: DefaultIngressPort, Transparent: DefaultTransparentPort}
+	return HostPorts{Control: DefaultControlPort, Ingress: DefaultIngressPort}
 }
 
 // ResolveHostPorts merges, in order: defaults, ~/.piso/ports.json, process
@@ -113,7 +109,6 @@ func CheckHostPortsFree(p HostPorts) error {
 		port int
 		flag string
 	}{
-		{"proxy", p.Proxy, "--proxy-port"},
 		{"control", p.Control, "--ctrl-port"},
 		{"ingress", p.Ingress, "--ingress-port"},
 	}
@@ -206,27 +201,19 @@ func isUnusableIPv6(err error) bool {
 }
 
 func mergePorts(base, over HostPorts) HostPorts {
-	if over.Proxy != 0 {
-		base.Proxy = over.Proxy
-	}
 	if over.Control != 0 {
 		base.Control = over.Control
 	}
 	if over.Ingress != 0 {
 		base.Ingress = over.Ingress
 	}
-	if over.Transparent != 0 {
-		base.Transparent = over.Transparent
-	}
 	return base
 }
 
 func portsFromEnv() HostPorts {
 	return HostPorts{
-		Proxy:       envInt("PISO_PROXY_PORT"),
-		Control:     envInt("PISO_CTRL_PORT"),
-		Ingress:     envInt("PISO_INGRESS_PORT"),
-		Transparent: envInt("PISO_TRANSPARENT_PORT"),
+		Control: envInt("PISO_CTRL_PORT"),
+		Ingress: envInt("PISO_INGRESS_PORT"),
 	}
 }
 
@@ -244,7 +231,7 @@ func envInt(key string) int {
 
 func validatePorts(p HostPorts) error {
 	seen := map[int]string{}
-	for name, port := range map[string]int{"proxy": p.Proxy, "control": p.Control, "ingress": p.Ingress, "transparent": p.Transparent} {
+	for name, port := range map[string]int{"control": p.Control, "ingress": p.Ingress} {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("%s port %d is out of range", name, port)
 		}

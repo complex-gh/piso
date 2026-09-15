@@ -1,50 +1,43 @@
 # piso
 
-Isolate an AI coding agent (pi) inside a Docker worker, with all egress gated
-through a MITM gateway that substitutes fake credentials for real ones and
-blocks anything that looks like a real credential.
+Isolate an AI coding agent (pi) inside a Docker worker. Egress TCP/443 is
+intercepted by a MITM gateway that substitutes fake credentials for real ones
+and blocks anything that looks like a real credential. Unruled :443 is spliced
+as real end-to-end TLS.
 
 ```
 you (terminal: piso / host browser)
-   │                 │  1 published port on gateway (TLS via its CA)
+   │                 │  1 published port on gateway
    ▼                 ▼
 GATEWAY  ── control plane (UI: secrets, patterns, log; API: expose, retry)
-   │  egress MITM (CONNECT → substitute piso_ placeholders / block real creds)
+   │  egress  vpc :443 → SNI intercept (MITM ruled / splice unruled)
    │  ingress  (name.piso.local → worker:port)
    ▼
 WORKER (pi, Bun)  ── named volume ~/.pi/agent (sessions persist)
-   └─ mount: project dir (rw)     piso_vpc is internal ⇒ gateway is the only egress
+   └─ mount: project dir (rw)
 ```
 
 ## Core guarantees
 
 - **The worker never holds real credentials.** Only `piso_...` placeholders.
   Real values live in the gateway's secrets file (host-mounted, gateway-only).
-- **Any request that carries a real credential — or anything that *looks* like
-  one — is blocked and flagged.** Detection uses a comprehensive, updatable
-  regex library (plus exact matches against known real values) so a leaked key
-  can't ride out even if the worker never saw it in the vault.
+- **Ruled HTTPS is inspected.** A request that carries a real credential — or
+  anything that *looks* like one — is blocked and flagged. Detection uses a
+  regex library (plus exact matches against known real values).
 - **Blocked requests are first-class objects** with an id, a captured request,
   and a retry button: add a secret/exception, retry, done.
-- **Everything is gated**: the worker's only egress is the gateway (`piso_vpc`
-  is a Docker internal network — off-bridge forwarding is dropped), and its
-  only ingress is the gateway's reverse proxy.
-- **Transparency by default** (since this branch): CONNECTs to hosts that no
-  rule/domain/exception references are spliced as a raw byte tunnel instead
-  of being MITM'd — real end-to-end TLS, no CA needed on the client,
-  invisible proxy (CCT-style). Hosts with any policy stay fully inspected,
-  blocked, and logged. Set `PISO_PASSTHROUGH_UNROUTED=false` to return to
-  always-MITM. Enabling it trades inspection of unruled traffic for zero
-  client friction, and pairs with host-side default-route + iptables REDIRECT
-  for fully transparent egress.
+- **Unruled :443 is spliced.** Real origin certs, no log, no CA. Non-443
+  traffic NATs off the vpc bridge.
+- **Ingress is gated.** The only way onto a worker port is the gateway's
+  reverse proxy (`*.piso.local`).
 
 ## Layout
 
 ```
 cli/     Go CLI: piso          (up, attach, expose, logs, secrets, dashboard)
-gateway/ Go MITM proxy + control plane + request log + web UI
+gateway/ Go SNI intercept + control plane + request log + web UI
 worker/  Docker image: pi/Bun + CA trust + hardening
-compose/ docker-compose (worker + gateway, piso_vpc internal)
+compose/ docker-compose (worker + gateway, piso_vpc)
 ```
 
 ## Quick start
@@ -70,7 +63,11 @@ The dashboard is **http://piso.local** (host port 80 → container 8081). `piso 
 piso up --ctrl-port 8081    # then http://piso.local:8081
 ```
 
-`--proxy-port` and `--ingress-port` work the same way. A taken port is a hard error, not a silent remap. Chosen ports are saved in `~/.piso/ports.json`.
+`--ingress-port` works the same way. A taken port is a hard error, not a silent remap. Chosen ports are saved in `~/.piso/ports.json`.
+
+On iptables hosts, `make install` also installs vpc `:443` DNAT
+(`scripts/transparent-egress.sh`). Re-run that script after the gateway
+container is recreated (new vpc IP).
 
 ### Hosts sync daemon (auto subdomains)
 

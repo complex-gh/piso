@@ -206,7 +206,7 @@ func TestWorkerActivityAcceptsHostKind(t *testing.T) {
 	wh := s.WorkerHandler()
 	if w := doJSON(t, wh, "POST", "/api/v1/worker/activity", map[string]any{
 		"worker": "piso-worker-demo", "kind": "host",
-		"text": "Clone git@github.com:org/repo.git -> /workspace/repo",
+		"text": "Clone git@example.com:org/repo.git -> /workspace/repo",
 	}); w.Code != 201 {
 		t.Fatalf("host kind %d %s", w.Code, w.Body.String())
 	}

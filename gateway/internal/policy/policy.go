@@ -47,8 +47,7 @@ func Decide(in Input) model.Decision {
 	// 1. Internal / control-plane targets: loopback, link-local, private
 	//    ranges and metadata are hard-blocked. .piso.local and container
 	//    service names are the gateway's own and are allowed (the worker
-	//    legitimately calls the control API — which is on the internal
-	//    network and never passes through the egress proxy anyway).
+	//    legitimately calls the worker API on :8083 — vpc HTTP, not :443).
 	ip := net.ParseIP(in.Host)
 	if isInternal(in.Host, ip) {
 		appendReason(model.ReasonInternalTarget)

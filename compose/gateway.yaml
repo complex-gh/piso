@@ -1,13 +1,12 @@
 # piso gateway compose — the shared, one-per-machine service.
 # Project name "piso" ⇒ networks/containers are piso_vpc / piso_gateway.
 # The worker compose (generated per-project by `piso up`) joins piso_vpc as an
-# external network, so the gateway is the ONLY member with egress.
+# external network.
 #
-# Load-bearing: piso_vpc is an *internal* network. Docker drops any packet
-# forwarded off that bridge, so the worker has no path to the internet except
-# the gateway (which is also on the egress network). Masquerade-off is extra.
-# Compose will not flip Internal on an already-created piso_vpc — `piso up`
-# tears it down and recreates it when the existing one is leaky.
+# piso_vpc NATs off the bridge (internal: false). Host iptables DNATs worker
+# TCP/443 to the gateway's vpc address :8084 (SNI intercept). Unruled :443 is
+# spliced; ruled hosts are MITM'd. The worker API (:8083) stays on the vpc
+# and is never intercepted.
 name: piso
 
 services:
@@ -18,22 +17,15 @@ services:
     container_name: piso-gateway
     restart: unless-stopped
     ports:
-      # Host ports are set by `piso up --*-port` (PISO_*_PORT). In-container
-      # listen ports stay 8080/8081/8082/8083 so the worker proxy env does not change.
-      # :8083 is the worker API and is not published to the host.
+      # Host ports are set by `piso up --*-port` (PISO_*_PORT).
+      # :8083 worker API and :8084 SNI intercept are vpc-only (not published).
       # Bind both 127.0.0.1 and ::1: /etc/hosts maps piso.local to both (macOS
       # .local is mDNS; without ::1, IPv6 lookups hang). IPv4-only publish
       # leaves ::1:80 dead, so browsers stall and the dashboard looks empty.
-      - "127.0.0.1:${PISO_PROXY_PORT:-8080}:8080"
-      - "[::1]:${PISO_PROXY_PORT:-8080}:8080"
       - "127.0.0.1:${PISO_CTRL_PORT:-80}:8081"
       - "[::1]:${PISO_CTRL_PORT:-80}:8081"
       - "127.0.0.1:${PISO_INGRESS_PORT:-8082}:8082"
       - "[::1]:${PISO_INGRESS_PORT:-8082}:8082"
-      # Transparent interception (CCT-style): the host DNATs RULED hosts'
-      # :443 to this port; the gateway sniffs SNI and MITMs only ruled hosts.
-      - "127.0.0.1:${PISO_TRANSPARENT_PORT:-8084}:8084"
-      - "[::1]:${PISO_TRANSPARENT_PORT:-8084}:8084"
     volumes:
       # Machine-level state (secrets, CA, log). The CLI sets PISO_DATA
       # (default ~/.piso) so an installed binary does not need a writable repo.
@@ -45,12 +37,10 @@ services:
       PISO_ACTIVITIES_FILE: /data/activities.db
       PISO_CA_CERT: /data/ca.crt
       PISO_CA_KEY: /data/ca.key
-      PISO_PROXY_LISTEN: :8080
       PISO_CTRL_LISTEN: :8081
       PISO_WORKER_LISTEN: :8083
       PISO_INGRESS_LISTEN: :8082
-      # REDIRECT/DNAT target for transparent (SNI-based) interception. The
-      # host script scripts/transparent-egress.sh DNATs ruled hosts here.
+      # SNI intercept: host DNATs vpc TCP/443 here (gateway vpc IP, not a host port).
       PISO_TRANSPARENT_LISTEN: :8084
       # The public WEB port (same listener as the control plane — WebHandler
       # dispatches dashboard vs ingress by Host on one port), advertised on
@@ -64,10 +54,10 @@ services:
 
   # Project manager: a special worker that reads activity and decides pokes/
   # reminders. Host-scoped (watches all projects), so it lives with the
-  # gateway — same lifecycle, same sandboxing (internal vpc, cap_drop,
-  # no project mount, read-only rootfs). Its slug is "monitor", but nothing
-  # in the codebase treats it differently — it is an ordinary worker whose
-  # LLM access is a scoped secret (Workers: [monitor]).
+  # gateway — same lifecycle, same sandboxing (vpc, cap_drop, no project
+  # mount, read-only rootfs). Its slug is "monitor", but nothing in the
+  # codebase treats it differently — it is an ordinary worker whose LLM
+  # access is a scoped secret (Workers: [monitor]).
   monitor:
     image: piso-worker
     container_name: piso-worker-monitor
@@ -84,9 +74,6 @@ services:
       - ${PISO_DATA}/pi-profile/models.json:/root/.pi/agent/models.json:ro
       - ${PISO_DATA}/workers/monitor:/etc/piso:ro   # dir mount: env rewrites are visible live (atomic rename swaps the inode)
     environment:
-      HTTPS_PROXY: http://gateway:8080
-      HTTP_PROXY: http://gateway:8080
-      NO_PROXY: gateway,localhost,127.0.0.1,*.piso.local
       GATEWAY_URL: http://gateway:8083
       PISO_WORKER_NAME: piso-worker-monitor
       PISO_WORKER_SLUG: monitor
@@ -110,11 +97,8 @@ networks:
   vpc:
     name: piso_vpc
     driver: bridge
-    # CCT-style transparency: the worker bridge is allowed to NAT to the
-    # internet on its own (no proxy, no CA for unrouted hosts). This drops
-    # the old "gateway is the only egress" invariant — see
-    # docs/TRANSPARENT_EGRESS.md for the tradeoff and the DNAT interception
-    # of ruled hosts that keeps substitution working.
+    # Worker default route NATs off this bridge. Host iptables DNATs TCP/443
+    # to the gateway vpc address :8084 for SNI intercept.
     internal: false
     enable_ipv6: false
     driver_opts:

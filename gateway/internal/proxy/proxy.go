@@ -1,6 +1,7 @@
-// Package proxy implements the gateway's MITM egress: explicit proxy (CONNECT
-// + plain HTTP absolute-URI) with TLS termination, policy decision, credential
-// substitution, forwarding, and blocked-request capture for replay.
+// Package proxy implements the gateway's MITM egress: a transparent TCP/443
+// listener that sniffs TLS SNI, then either terminates TLS (ruled hosts:
+// scan, substitute, block) or splices a raw byte tunnel (unruled hosts:
+// real end-to-end TLS, no inspection). Blocked requests are captured for replay.
 package proxy
 
 import (
@@ -18,7 +19,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,17 +45,12 @@ const streamTimeout = 10 * time.Minute
 // would hold SSE tokens in the gateway until the buffer filled.
 const streamCopyBuf = 1024
 
-// Handler is the egress MITM proxy.
+// Handler is the egress MITM: SNI intercept, substitution, and splice.
 type Handler struct {
 	CA       *CA
 	Patterns *patterns.Compiled
 	Store    *store.Store
 	Worker   func(*http.Request) string // request -> worker identity
-	// PassthroughUnrouted enables CCT-style transparency: CONNECTs to hosts
-	// that no rule/domain/exception touches are spliced as raw TCP (no TLS
-	// termination, no inspection), so those clients need no CA trust and see
-	// a normal forward proxy. Hosts with any policy stay MITM'd + guarded.
-	PassthroughUnrouted bool
 
 	client *http.Client
 }
@@ -63,22 +58,21 @@ type Handler struct {
 // New builds the handler with a forwarding client that never follows
 // redirects automatically: redirects are returned to the client so the next
 // hop is re-scanned and re-policed by the gateway.
-func New(ca *CA, st *store.Store, pat *patterns.Compiled, workerFn func(*http.Request) string, passthroughUnrouted bool) *Handler {
+func New(ca *CA, st *store.Store, pat *patterns.Compiled, workerFn func(*http.Request) string) *Handler {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	// Never inherit HTTP_PROXY: the gateway is the proxy. DisableCompression
-	// keeps upstream Content-Encoding intact so we do not rewrite lengths.
-	// Keep HTTP/2 to origin (registry.npmjs.org ALPN is h2-only-enough that
-	// ForceAttemptHTTP2=false reads SETTINGS as HTTP/1.1 and 502s). Rewrite
-	// the response to HTTP/1.1 before writing it onto the MITM tunnel.
+	// DisableCompression keeps upstream Content-Encoding intact so we do not
+	// rewrite lengths. Keep HTTP/2 to origin (registry.npmjs.org ALPN is
+	// h2-only-enough that ForceAttemptHTTP2=false reads SETTINGS as HTTP/1.1
+	// and 502s). Rewrite the response to HTTP/1.1 before writing it onto the
+	// MITM tunnel.
 	tr.Proxy = nil
 	tr.DisableCompression = true
 	tr.ResponseHeaderTimeout = headerTimeout
 	return &Handler{
-		CA:                  ca,
-		Store:               st,
-		Patterns:            pat,
-		Worker:              workerFn,
-		PassthroughUnrouted: passthroughUnrouted,
+		CA:       ca,
+		Store:    st,
+		Patterns: pat,
+		Worker:   workerFn,
 		client: &http.Client{
 			Transport: tr,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -86,102 +80,6 @@ func New(ca *CA, st *store.Store, pat *patterns.Compiled, workerFn func(*http.Re
 			},
 		},
 	}
-}
-
-// ServeHTTP dispatches CONNECT tunnels vs plain-HTTP absolute-URI requests.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodConnect {
-		h.handleConnect(w, r)
-		return
-	}
-	h.handlePlainHTTP(w, r)
-}
-
-// handleConnect establishes the MITM tunnel.
-func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
-	target := r.Host
-	if !strings.Contains(target, ":") {
-		target += ":443"
-	}
-	host, portS, err := net.SplitHostPort(target)
-	if err != nil {
-		http.Error(w, "bad CONNECT target", http.StatusBadRequest)
-		return
-	}
-	port := 443
-	if portS != "" {
-		if v, perr := strconv.Atoi(portS); perr == nil && v > 0 && v <= 65535 {
-			port = v
-		}
-	}
-	// Hard network-level block on internal targets (belt & braces with policy).
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
-		h.Store.AppendLog(store.Record{
-			ID: recID(), Worker: h.workerID(r), Slug: h.workerID(r), Ts: time.Now().UTC(),
-			Method: http.MethodConnect, Scheme: "https", Host: host, Path: "/",
-			Action: string(model.ActionBlock), Status: http.StatusForbidden,
-			Reasons: []string{string(model.ReasonInternalTarget)},
-		})
-		http.Error(w, "internal target denied", http.StatusForbidden)
-		return
-	}
-	// Internet kill-switch: worker toggled off in the dashboard can't egress.
-	if blocked, slug := h.workerInternetBlocked(r); blocked {
-		h.Store.AppendLog(store.Record{
-			ID: recID(), Worker: h.workerID(r), Slug: slug, Ts: time.Now().UTC(),
-			Method: http.MethodConnect, Scheme: "https", Host: host, Path: "/",
-			Action: string(model.ActionBlock), Status: http.StatusForbidden,
-			Reasons: []string{"internet-disabled"},
-		})
-		http.Error(w, "internet access disabled for this worker", http.StatusForbidden)
-		return
-	}
-
-	// Resolve + verify the destination is not internal (hostnames may resolve
-	// to private ranges — metadata-style attacks).
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		http.Error(w, "resolution failed", http.StatusBadGateway)
-		return
-	}
-	for _, a := range addrs {
-		if a.IP.IsLoopback() || a.IP.IsPrivate() || a.IP.IsLinkLocalUnicast() || a.IP.IsUnspecified() {
-			http.Error(w, "internal target denied", http.StatusForbidden)
-			return
-		}
-	}
-
-	// CCT-style transparency: a host that no rule, domain policy, or
-	// exception references is spliced as a raw byte tunnel instead of being
-	// MITM'd. The client keeps real end-to-end TLS with the origin, needs no
-	// gateway CA, and the gateway stays invisible to that connection.
-	if h.PassthroughUnrouted && !h.hostNeedsInterception(host) {
-		h.handlePassthrough(w, r, host, port, addrs)
-		return
-	}
-
-	// Claim the tunnel.
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "hijack unsupported", http.StatusInternalServerError)
-		return
-	}
-	conn, brw, err := hj.Hijack()
-	if err != nil {
-		log.Printf("proxy: hijack failed: %v", err)
-		return
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Time{})
-	if _, err := brw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		return
-	}
-	if err := brw.Flush(); err != nil {
-		return
-	}
-	h.serveMITM(conn, brw.Reader, host, r)
 }
 
 // serveMITM terminates TLS with a leaf for host and serves decrypted
@@ -207,7 +105,6 @@ func (h *Handler) serveMITM(conn net.Conn, br *bufio.Reader, host string, r *htt
 	defer tlsConn.Close()
 
 	// Serve decrypted HTTP/1.1 from the client over the tunnel.
-	// Do not use the CONNECT request context: it can be canceled after hijack.
 	brr := bufio.NewReader(tlsConn)
 	for {
 		req, err := http.ReadRequest(brr)
@@ -219,9 +116,8 @@ func (h *Handler) serveMITM(conn net.Conn, br *bufio.Reader, host string, r *htt
 		if req.Host == "" {
 			req.Host = host
 		}
-		// http.ReadRequest does not populate RemoteAddr (the server normally
-		// does). The CONNECT request r carries the worker's origin IP — copy it
-		// so worker-identity lookup (IP→slug) works for tunneled requests.
+		// http.ReadRequest does not populate RemoteAddr. r carries the worker's
+		// origin IP so worker-identity lookup (IP→slug) works for MITM'd requests.
 		req.RemoteAddr = r.RemoteAddr
 		// streamTimeout covers headers + streamed body. headerTimeout on
 		// the transport still fails fast when the origin never sends headers.
@@ -241,7 +137,7 @@ func (h *Handler) serveMITM(conn net.Conn, br *bufio.Reader, host string, r *htt
 
 // hostNeedsInterception reports whether any configured rule, domain policy,
 // or enabled exception references host. Only such hosts are MITM'd; every
-// other host may be spliced transparently when PassthroughUnrouted is set.
+// other host is spliced as raw TCP (real end-to-end TLS, no inspection).
 func (h *Handler) hostNeedsInterception(host string) bool {
 	for _, r := range recRules(h.Store) {
 		if r.Host == "*" || strings.EqualFold(r.Host, host) {
@@ -267,30 +163,6 @@ func (h *Handler) hostNeedsInterception(host string) bool {
 		}
 	}
 	return false
-}
-
-// handlePassthrough answers the CONNECT with 200 and bridges the raw TCP
-// stream to the origin — no TLS termination, no scanning, no CA. Either leg
-// ending tears down both; this returns once the splice finishes.
-func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, host string, port int, addrs []net.IPAddr) {
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "hijack unsupported", http.StatusInternalServerError)
-		return
-	}
-	conn, brw, err := hj.Hijack()
-	if err != nil {
-		log.Printf("proxy: passthrough: hijack failed: %v", err)
-		return
-	}
-	defer conn.Close()
-	if _, err := brw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		return
-	}
-	if err := brw.Flush(); err != nil {
-		return
-	}
-	h.splice(conn, brw.Reader, host, port, addrs)
 }
 
 // splice bridges br (the client side, which may already hold buffered bytes
@@ -358,16 +230,25 @@ func (h *Handler) resolveExternalHost(host string) ([]net.IPAddr, error) {
 	return addrs, nil
 }
 
-// handleTransparentConn handles one connection accepted on the REDIRECT
-// listener: sniff the TLS SNI, replay the buffered ClientHello, then apply
-// the same selective-interception decision as CONNECT (MITM when the host is
-// ruled, raw splice otherwise). No SO_ORIGINAL_DST needed — the gateway
-// dials the origin itself.
+// handleTransparentConn handles one connection accepted on the intercept
+// listener: sniff TLS SNI, replay the buffered ClientHello, then MITM when
+// the host is ruled or splice raw TCP otherwise. No SO_ORIGINAL_DST needed —
+// the gateway dials the origin itself from SNI.
 func (h *Handler) handleTransparentConn(conn net.Conn, remote string) {
 	defer conn.Close()
 	sni, hello, err := readClientHelloSNI(conn)
 	if err != nil || sni == "" {
 		log.Printf("proxy: transparent: no SNI (%v)", err)
+		return
+	}
+	r := &http.Request{RemoteAddr: remote}
+	if blocked, slug := h.workerInternetBlocked(r); blocked {
+		h.Store.AppendLog(store.Record{
+			ID: recID(), Worker: h.workerID(r), Slug: slug, Ts: time.Now().UTC(),
+			Method: "HTTPS", Scheme: "https", Host: sni, Path: "/",
+			Action: string(model.ActionBlock), Status: http.StatusForbidden,
+			Reasons: []string{"internet-disabled"},
+		})
 		return
 	}
 	addrs, rerr := h.resolveExternalHost(sni)
@@ -376,16 +257,15 @@ func (h *Handler) handleTransparentConn(conn net.Conn, remote string) {
 		return
 	}
 	br := bufio.NewReader(&prependReader{Conn: conn, Prefix: hello})
-	r := &http.Request{RemoteAddr: remote}
-	if h.PassthroughUnrouted && !h.hostNeedsInterception(sni) {
+	if !h.hostNeedsInterception(sni) {
 		h.splice(conn, br, sni, 443, addrs)
 		return
 	}
 	h.serveMITM(conn, br, sni, r)
 }
 
-// serveTransparentLoop accepts raw TLS connections on addr (the iptables
-// REDIRECT target) and dispatches each to handleTransparentConn.
+// ServeTransparentLoop accepts raw TLS connections on addr (vpc :443 intercept
+// target) and dispatches each to handleTransparentConn.
 func (h *Handler) ServeTransparentLoop(addr string) error {
 	la, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
@@ -548,9 +428,8 @@ func (c *prependReader) Read(p []byte) (int, error) {
 	return c.Conn.Read(p)
 }
 
-// hijackedConn reads leftover bytes from Hijack's bufio.Reader before the
-// underlying connection. After CONNECT 200, the client often sends the TLS
-// ClientHello before we call Handshake; those bytes sit in br, not conn.
+// hijackedConn reads leftover bytes from a bufio.Reader before the underlying
+// connection. The intercepted ClientHello sits in br after SNI sniffing.
 type hijackedConn struct {
 	net.Conn
 	br *bufio.Reader
@@ -558,31 +437,6 @@ type hijackedConn struct {
 
 func (c *hijackedConn) Read(p []byte) (int, error) {
 	return c.br.Read(p)
-}
-
-// handlePlainHTTP forwards absolute-URI HTTP proxy requests.
-func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
-	target, err := url.ParseRequestURI(r.RequestURI)
-	if err != nil {
-		http.Error(w, "bad request URI", http.StatusBadRequest)
-		return
-	}
-	r.URL = target
-	out, keepAlive := h.process(r.Context(), r, "http")
-	defer out.Body.Close()
-	if out.StatusCode == 0 {
-		out.StatusCode = http.StatusOK
-	}
-	copyHeader(w.Header(), out.Header)
-	w.WriteHeader(out.StatusCode)
-	io.Copy(w, out.Body)
-	if out.Close || !keepAlive {
-		if hj, ok := w.(http.Hijacker); ok {
-			if c, _, err := hj.Hijack(); err == nil {
-				c.Close()
-			}
-		}
-	}
 }
 
 // Replay re-runs the full policy on a captured request and forwards it. This

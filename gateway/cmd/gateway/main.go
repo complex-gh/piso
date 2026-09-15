@@ -1,6 +1,6 @@
-// Command gateway runs the piso MITM gateway: egress proxy (CONNECT TLS
-// termination + substitution/blocking), the control-plane web UI + API, and
-// the ingress reverse proxy for name.piso.local routes.
+// Command gateway runs the piso MITM gateway: transparent TCP/443 intercept
+// (SNI → MITM ruled hosts / splice unruled), the control-plane web UI + API,
+// the worker API, and the ingress reverse proxy for name.piso.local routes.
 //
 // Flags follow the convention: everything is overridable by the CLI/compose.
 package main
@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"piso/gateway/internal/proxy"
@@ -19,10 +18,9 @@ import (
 	"piso/gateway/internal/store"
 )
 
-// workerIdentityFn returns the proxy's request→worker-identity callback. It
-// resolves the request's origin IP against the worker registry (populated by
-// the host CLI at `piso up`) and returns the worker slug, falling back to the
-// container name or, failing that, "worker".
+// workerIdentityFn returns the request→worker-identity callback. It resolves
+// the request's origin IP against the worker registry (populated by the host
+// CLI at `piso up`) and returns the worker slug.
 func workerIdentityFn(st *store.Store) func(*http.Request) string {
 	return func(r *http.Request) string {
 		slug, ok := st.WorkerByIP(remoteIP(r))
@@ -45,20 +43,6 @@ func remoteIP(r *http.Request) string {
 	return host
 }
 
-// envBool reads a boolean env var; anything except 1/true/on/yes (folded) is
-// false, so an unset or empty value falls back to def.
-func envBool(name string, def bool) bool {
-	v, ok := os.LookupEnv(name)
-	if !ok || v == "" {
-		return def
-	}
-	l := strings.ToLower(v)
-	if l == "1" || l == "true" || l == "on" || l == "yes" {
-		return true
-	}
-	return false
-}
-
 func main() {
 	var (
 		statePath      = flag.String("state", envOr("PISO_STATE_FILE", ".piso/state.json"), "state file (secrets/rules/domains/exceptions/routes)")
@@ -67,13 +51,11 @@ func main() {
 		activitiesPath = flag.String("activities", envOr("PISO_ACTIVITIES_FILE", ".piso/activities.db"), "activity database (SQLite)")
 		caCertPath     = flag.String("ca-cert", envOr("PISO_CA_CERT", ".piso/ca.crt"), "CA certificate (generated if missing)")
 		caKeyPath      = flag.String("ca-key", envOr("PISO_CA_KEY", ".piso/ca.key"), "CA private key (generated if missing)")
-		proxyAddr      = flag.String("proxy-listen", envOr("PISO_PROXY_LISTEN", ":8080"), "egress proxy listen addr")
 		ctrlAddr       = flag.String("ctrl-listen", envOr("PISO_CTRL_LISTEN", ":8081"), "control plane (UI+API) listen addr")
 		workerAddr     = flag.String("worker-listen", envOr("PISO_WORKER_LISTEN", ":8083"), "worker API listen addr (vpc only)")
 		ingressAddr    = flag.String("ingress-listen", envOr("PISO_INGRESS_LISTEN", ":8082"), "ingress reverse proxy listen addr")
 		maxLog         = flag.Int("max-log", 5000, "max in-memory log records")
-		transparent    = flag.String("transparent-listen", envOr("PISO_TRANSPARENT_LISTEN", ""), "REDIRECT listener for transparent (SNI-based) interception")
-		passthrough    = flag.Bool("passthrough-unrouted", envBool("PISO_PASSTHROUGH_UNROUTED", true), "splice CONNECTs for hosts without rules (CCT-style transparent proxy; default on)")
+		transparent    = flag.String("transparent-listen", envOr("PISO_TRANSPARENT_LISTEN", ":8084"), "SNI intercept listen addr (vpc :443)")
 	)
 	flag.Parse()
 
@@ -96,25 +78,20 @@ func main() {
 		log.Fatalf("ca: %v", err)
 	}
 
-	h := proxy.New(ca, st, pat, workerIdentityFn(st), *passthrough)
-	if *transparent != "" {
-		go func() {
-			if err := h.ServeTransparentLoop(*transparent); err != nil {
-				log.Printf("transparent listener: %v", err)
-			}
-		}()
-	}
+	h := proxy.New(ca, st, pat, workerIdentityFn(st))
+	go func() {
+		if err := h.ServeTransparentLoop(*transparent); err != nil {
+			log.Fatalf("transparent listener: %v", err)
+		}
+	}()
 	srv := server.New(st, pat, h, ca)
 
 	// WebHandler is the single host web entrypoint (dashboard + ingress on the
-	// same port, dispatched by Host). The old ControlHandler is kept for tests;
-	// IngressHandler is kept on the ingress port for backward compatibility.
+	// same port, dispatched by Host). IngressHandler is kept on the ingress
+	// port for backward compatibility.
 	go serve("web", *ctrlAddr, srv.WebHandler())
 	go serve("worker-api", *workerAddr, srv.WorkerHandler())
-	go serve("ingress", *ingressAddr, srv.IngressHandler())
-	serve("egress-proxy", *proxyAddr, h)
-
-	select {}
+	serve("ingress", *ingressAddr, srv.IngressHandler())
 }
 
 func serve(name, addr string, h http.Handler) {

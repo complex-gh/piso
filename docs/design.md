@@ -8,7 +8,7 @@ plus prompt-injected content from repositories/docs/build output it reads.
 **Assets to protect, in order**:
 1. Real credentials — must never reach the worker (disk, env, memory).
 2. Host filesystem — only the project mount is exposed.
-3. Host network — the worker can only reach the internet through the gateway.
+3. Host network — worker TCP/443 is intercepted (ruled hosts MITM'd; unruled spliced). Non-443 NATs off the vpc bridge.
 
 **Assumed trusted**: the host user, the gateway container, Docker's isolation,
 and the pi process as the workload (it is the *attacker*, not the trust root —
@@ -24,19 +24,20 @@ defense against a compromised host; DoS.
 host (you)
   │  piso CLI  ·  browser dashboard (http://piso.local)  ·  ingress (*.piso.local)
   ▼
-GATEWAY  piso-gateway (sole egress)
-  ├─ :8080  egress MITM proxy   (CONNECT → TLS terminate → scan → decide)
+GATEWAY  piso-gateway
+  ├─ :8084  SNI intercept       (MITM ruled hosts / splice unruled :443)
   ├─ :8081  control plane       (web UI at http://piso.local; host port settable via --ctrl-port)
+  ├─ :8083  worker API          (vpc only: informant, checkin, ports, context)
   └─ :8082  ingress reverse proxy (name.piso.local → worker:port)
   │
   ▼
 WORKER  piso-worker-<proj>  — pi on Bun
   ├─ /workspace  ← host project dir (rw, the only host mount)
   ├─ piso-agent  ← named volume for pi sessions (persist across attach)
-  └─ /piso-ca.pem ← gateway CA (ro) so Bun/curl trust the MITM cert
+  └─ /piso-ca.pem ← gateway CA (ro) so MITM'd (ruled) TLS verifies
 ```
 
-Docker network `piso_vpc` is **`internal: true`**. Docker drops traffic forwarded off that bridge, so the worker has no path to the internet, LAN, or IMDS except the gateway (which is also on `piso_egress`, a normal NAT network). Masquerade is also disabled as belt-and-suspenders. This flag is the enforcement point — without it the whole design is advisory. Compose will not flip `Internal` on an already-created network; `piso up` tears down a leaky `piso_vpc` and recreates it.
+Docker network `piso_vpc` is **`internal: false`** with masquerade: unruled traffic NATs off the bridge. Host iptables DNATs vpc TCP/443 (except the vpc subnet) to the gateway's vpc address `:8084`. Compose will not flip `Internal` on an already-created network; `piso up` tears down a leaky `piso_vpc` and recreates it.
 
 Worker hardening: `cap_drop: [ALL]`, `no-new-privileges`, `--init`, read-only rootfs, `/tmp`+`/run`+`/root/.cache` as tmpfs, no docker.sock, no host `~/.ssh` or `~/.pi/agent` (bare named volume).
 
@@ -79,9 +80,9 @@ Plan review (`plan-<slug>.piso.local`) is the same ingress hop. Plannotator bind
 
 ```
 cli/     Go CLI: piso (up/down/attach/status/secrets/expose/logs/dashboard)
-gateway/ Go MITM proxy + control plane + web UI (embedded)
+gateway/ Go SNI intercept + control plane + web UI (embedded)
 worker/  Docker image: node + pi, CA trust baked, hardening in compose
 compose/ gateway.yaml (shared) + worker.yaml.tmpl (per-project render)
-scripts/ smoke.sh: end-to-end verify of substitute/block/retry/ingress (no Docker)
-         isolation.sh: worker noproxy must fail; proxy and gateway egress must work
+scripts/ smoke.sh: control-plane + ingress + worker-API checks (no Docker)
+         isolation.sh: worker API reachable; vpc NATs; no proxy env
 ```

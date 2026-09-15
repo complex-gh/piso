@@ -13,15 +13,16 @@ everything below is simple:
 - `/workspace` is the host's project directory, rw, **mount-shared**: anything
   the host drops under `/workspace` is visible to you, and anything you write
   there is visible to the host.
-- HTTP(S) egress is proxied through the gateway. Real credentials are never
-  available; the proxy substitutes `piso_…` placeholders or blocks/ flags the
-  request. Public fetches (package registries, docs, public git over https)
-  generally work.
+- HTTPS :443 is intercepted on the vpc: ruled hosts are MITM'd (placeholders
+  substituted, credential-looking payloads blocked); unruled hosts are spliced
+  with real end-to-end TLS. Real credentials never exist in this worker —
+  only `piso_…` placeholders.
 - Any dev-server port you bind is automatically published as
   `http://<slug>-<port>.piso.local` (or `?route=` on the apex) — no host
   ceremony needed.
 - The worker API at `$GATEWAY_URL` (:8083) is reachable: health, checkin,
-  capabilities, activity, context, ports.
+  capabilities, activity, context, ports. It is vpc HTTP, not :443, so it is
+  never intercepted.
 - `/root/.pi/agent` (and `/var` equivalents) persist: sessions, skills,
   extensions, logs.
 
@@ -46,11 +47,11 @@ For any out-of-bounds step, do all of the following:
    command and a rendezvous path for the result (always under `/workspace`):
    ```
    HOST ACTION REQUEST: clone the private repo
-     COMMAND: cd /abs/path && git clone git@github.com:org/repo.git
+     COMMAND: cd /abs/path && git clone git@example.com:org/repo.git
      RESULT:  /workspace/repo   (then I can continue with the vendoring)
    ```
 2. **Surface it on the board** so it survives this session:
-   `piso-informant host "git clone git@github.com:org/repo.git → /workspace/repo"`
+   `piso-informant host "git clone git@example.com:org/repo.git → /workspace/repo"`
 3. **Rendezvous**: later, check the RESULT path. If it exists, continue from
    there. If it does not, the host has not done it yet — re-ask (a new
    `host` event or a `poke` to the project), never block, never retry the
@@ -80,6 +81,6 @@ If you must verify a boundary yourself, wrap the probe in `timeout 3` — an
 unproxied ssh/git connection will hang indefinitely in this network:
 
 ```bash
-timeout 3 git ls-remote git@github.com:org/repo.git   # will hang→timeout; don't bother
-timeout 3 curl -sI https://example.com                # fine through the proxy
+timeout 3 git ls-remote git@example.com:org/repo.git   # will hang→timeout; don't bother
+timeout 3 curl -sI https://example.com                # unruled :443 is spliced
 ```

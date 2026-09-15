@@ -9,7 +9,7 @@ import (
 func TestDashboardURLOmitsPort80(t *testing.T) {
 	t.Setenv("PISO_DATA", t.TempDir())
 	t.Setenv("PISO_GATEWAY", "")
-	if err := saveHostPorts(HostPorts{Proxy: 8080, Control: 80, Ingress: 8082}); err != nil {
+	if err := saveHostPorts(HostPorts{Control: 80, Ingress: 8082}); err != nil {
 		t.Fatal(err)
 	}
 	if got := DashboardURL(); got != "http://piso.local" {
@@ -20,7 +20,7 @@ func TestDashboardURLOmitsPort80(t *testing.T) {
 func TestDashboardURLIncludesNonDefaultPort(t *testing.T) {
 	t.Setenv("PISO_DATA", t.TempDir())
 	t.Setenv("PISO_GATEWAY", "")
-	if err := saveHostPorts(HostPorts{Proxy: 8080, Control: 8081, Ingress: 8082}); err != nil {
+	if err := saveHostPorts(HostPorts{Control: 8081, Ingress: 8082}); err != nil {
 		t.Fatal(err)
 	}
 	if got := DashboardURL(); got != "http://piso.local:8081" {
@@ -31,14 +31,13 @@ func TestDashboardURLIncludesNonDefaultPort(t *testing.T) {
 func TestResolveHostPortsCLIOverridesPersist(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PISO_DATA", dir)
-	t.Setenv("PISO_PROXY_PORT", "")
 	t.Setenv("PISO_CTRL_PORT", "")
 	t.Setenv("PISO_INGRESS_PORT", "")
 	got, err := ResolveHostPorts(HostPorts{Control: 9091})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Control != 9091 || got.Proxy != DefaultProxyPort {
+	if got.Control != 9091 || got.Ingress != DefaultIngressPort {
 		t.Fatalf("got %+v", got)
 	}
 	again := LoadHostPorts()
@@ -51,7 +50,7 @@ func TestResolveHostPortsCLIOverridesPersist(t *testing.T) {
 }
 
 func TestValidatePortsRejectsCollision(t *testing.T) {
-	err := validatePorts(HostPorts{Proxy: 8080, Control: 8080, Ingress: 8082})
+	err := validatePorts(HostPorts{Control: 80, Ingress: 80})
 	if err == nil {
 		t.Fatal("expected collision error")
 	}

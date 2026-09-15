@@ -1,88 +1,58 @@
 #!/bin/sh
-# transparent-egress.sh — host-side NAT for CCT-style transparent egress.
+# transparent-egress.sh — host-side NAT for transparent vpc :443 intercept.
 #
-# Makes the worker's default route lead straight to the internet (Docker
-# bridge masquerade, now that compose/gateway.yaml sets piso_vpc to
-# non-internal) and DNATs RULED hosts' :443 into the gateway's transparent
-# listener so substitution/blocking still works for them.
+# DNATs every TCP/443 packet arriving on the piso_vpc bridge (except traffic
+# already destined to the vpc subnet — worker API, DNS, gateway) to the
+# gateway container's vpc address:8084. The gateway sniffs SNI: ruled hosts
+# are MITM'd; unruled hosts are spliced as raw TLS.
 #
-# Needs root + iptables on the HOST (docker daemon host). Idempotent.
+# Needs root + iptables + docker on the docker-daemon host. Idempotent.
 #
 # Usage:
-#   sudo scripts/transparent-egress.sh install     # apply rules
-#   sudo scripts/transparent-egress.sh refresh     # re-resolve ruled-host IPs
+#   sudo scripts/transparent-egress.sh install
 #   sudo scripts/transparent-egress.sh status
 #   sudo scripts/transparent-egress.sh uninstall
-#
-# Environment:
-#   PISO_TRANSPARENT_PORT   host port published for :8084 (default 8084)
-#   INTERCEPT_HOSTS         space-separated ruled hosts (default: github.com api.github.com)
 set -eu
 
 CHAIN=PISO_TRANSPARENT
-HOSTS="${INTERCEPT_HOSTS:-github.com api.github.com}"
-
-# Host port for the gateway's transparent listener: env takes precedence,
-# then the persisted piso port config (~/.piso/ports.json, set by `piso up
-# --transparent-port N` or the compose default), then the built-in default.
-PORT="${PISO_TRANSPARENT_PORT:-}"
-if [ -z "$PORT" ] && [ -n "${PISO_DATA:-}" ] && [ -f "$PISO_DATA/ports.json" ]; then
-    PORT="$(python3 - "$PISO_DATA/ports.json" <<'PY'
-import json, sys
-try:
-    print(json.load(open(sys.argv[1])).get("transparentPort", 8084))
-except Exception:
-    print(8084)
-PY
-)"
-fi
-PORT="${PORT:-8084}"
+GW_NAME="${PISO_GATEWAY_CONTAINER:-piso-gateway}"
+NET_NAME="${PISO_VPC_NETWORK:-piso_vpc}"
 
 die() { echo "transparent-egress: $*" >&2; exit 1; }
 
 have_iptables() { command -v iptables >/dev/null 2>&1; }
-have_getent() { command -v getent >/dev/null 2>&1; }
+have_docker() { command -v docker >/dev/null 2>&1; }
 
-resolve_ips() { # host -> newline-separated IPv4 addrs
-    if have_getent; then
-        getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u
-    else
-        # shell-less fallback: host(1) or /etc/hosts via python
-        python3 - "$1" <<'PY'
-import socket, sys
-try:
-    for info in socket.getaddrinfo(sys.argv[1], None, socket.AF_INET):
-        print(info[4][0])
-except socket.gaierror:
-    pass
-PY
-    fi
+gateway_ip() {
+    docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{if eq $k "'"$NET_NAME"'"}}{{$v.IPAddress}}{{end}}{{end}}' "$GW_NAME" 2>/dev/null
+}
+
+vpc_bridge() {
+    # Docker names the linux bridge br-<first 12 of network id>.
+    id="$(docker network inspect -f '{{.Id}}' "$NET_NAME" 2>/dev/null)" || return 1
+    echo "br-$(echo "$id" | cut -c1-12)"
+}
+
+vpc_subnet() {
+    docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' "$NET_NAME" 2>/dev/null
 }
 
 install_rules() {
-    iptables -w -t nat -N "$CHAIN" 2>/dev/null || iptables -w -t nat -F "$CHAIN"
-    for h in $HOSTS; do
-        ips="$(resolve_ips "$h")"
-        [ -n "$ips" ] || { echo "transparent-egress: no A records for $h (skip)"; continue; }
-        for ip in $ips; do
-            # DNAT (not REDIRECT) so the destination is explicitly loopback,
-            # matching docker-proxy's 127.0.0.1:$PORT publish of :8084.
-            iptables -w -t nat -A "$CHAIN" -d "$ip/32" -p tcp --dport 443 \
-                -j DNAT --to-destination "127.0.0.1:$PORT"
-            echo "transparent-egress: intercept $h ($ip:443) -> 127.0.0.1:$PORT"
-        done
-    done
-    iptables -w -t nat -A "$CHAIN" -j RETURN
-    # Jump into the chain once (idempotent).
-    if ! iptables -w -t nat -C PREROUTING -j "$CHAIN" 2>/dev/null; then
-        iptables -w -t nat -I PREROUTING -j "$CHAIN"
-    fi
-    echo "transparent-egress: installed"
-}
+    gw="$(gateway_ip)"
+    [ -n "$gw" ] || die "gateway container $GW_NAME is not on $NET_NAME (is it up?)"
+    br="$(vpc_bridge)"
+    [ -n "$br" ] || die "could not resolve bridge for $NET_NAME"
+    subnet="$(vpc_subnet)"
+    [ -n "$subnet" ] || die "could not resolve subnet for $NET_NAME"
 
-refresh_rules() {
-    iptables -w -t nat -F "$CHAIN"
-    install_rules
+    iptables -w -t nat -N "$CHAIN" 2>/dev/null || iptables -w -t nat -F "$CHAIN"
+    iptables -w -t nat -A "$CHAIN" -d "$subnet" -j RETURN
+    iptables -w -t nat -A "$CHAIN" -p tcp --dport 443 -j DNAT --to-destination "$gw:8084"
+    if ! iptables -w -t nat -C PREROUTING -i "$br" -j "$CHAIN" 2>/dev/null; then
+        iptables -w -t nat -I PREROUTING -i "$br" -j "$CHAIN"
+    fi
+    echo "transparent-egress: $br TCP/443 → $gw:8084 (except $subnet)"
+    echo "transparent-egress: installed"
 }
 
 status() {
@@ -90,6 +60,11 @@ status() {
 }
 
 uninstall_rules() {
+    br="$(vpc_bridge 2>/dev/null || true)"
+    if [ -n "$br" ]; then
+        iptables -w -t nat -D PREROUTING -i "$br" -j "$CHAIN" 2>/dev/null || true
+    fi
+    # also drop a leftover jump that used no -i (older installs)
     iptables -w -t nat -D PREROUTING -j "$CHAIN" 2>/dev/null || true
     iptables -w -t nat -F "$CHAIN" 2>/dev/null || true
     iptables -w -t nat -X "$CHAIN" 2>/dev/null || true
@@ -97,10 +72,11 @@ uninstall_rules() {
 }
 
 have_iptables || die "iptables not found (must run on the docker host as root)"
+have_docker || die "docker not found (must run on the docker host)"
 case "${1:-install}" in
     install)   install_rules ;;
-    refresh)   refresh_rules ;;
     status)    status ;;
     uninstall) uninstall_rules ;;
-    *) echo "usage: $0 {install|refresh|status|uninstall}" >&2; exit 2 ;;
+    refresh)   install_rules ;; # alias: no IP list to refresh
+    *) echo "usage: $0 {install|status|uninstall}" >&2; exit 2 ;;
 esac

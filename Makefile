@@ -53,9 +53,9 @@ install: build
 	PISO_DATA="$(REAL_HOME)/.piso" $(PREFIX)/bin/piso sync daemon-restart || \
 		echo "piso: warning: sync daemon did not verify up (see above); retry: sudo PISO_DATA=$(REAL_HOME)/.piso $(PREFIX)/bin/piso sync daemon-restart"
 
-# Apply the transparent-egress DNAT rules for ruled hosts (Linux + iptables
-# hosts only). Runs after setup-install so the gateway's :8084 listener exists.
-# Non-fatal: on macOS/no-iptables hosts make install must still succeed.
+# Apply vpc :443 DNAT to the gateway (Linux + iptables hosts only). Runs after
+# setup-install so the gateway's :8084 listener exists. Non-fatal: on
+# macOS/no-iptables hosts make install must still succeed.
 host-nat:
 	@if command -v iptables >/dev/null 2>&1; then \
 		PISO_DATA="$(REAL_HOME)/.piso" scripts/transparent-egress.sh install \
@@ -97,7 +97,7 @@ gw-run:
 smoke:
 	./scripts/smoke.sh
 
-# Docker-level: worker noproxy must fail; proxy + gateway egress must work.
+# Docker-level: vpc NATs; worker API reachable; no HTTP(S)_PROXY on the image.
 isolation:
 	./scripts/isolation.sh
 

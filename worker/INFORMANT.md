@@ -26,7 +26,7 @@ Do this **briefly and often** — one short line, not prose:
   credential-bearing git, privileged writes): do NOT attempt it — emit a
   Host Action Request. See the CAPABILITIES section below for the format and
   the boundary list.
-  `piso-informant host "git clone git@github.com:org/repo.git · result → /workspace/repo"`
+  `piso-informant host "git clone git@example.com:org/repo.git · result → /workspace/repo"`
 - **Any notable status the human should know**:
   `piso-informant note "spent the afternoon on the CQRS docs"`
 

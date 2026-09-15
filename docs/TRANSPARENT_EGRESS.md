@@ -1,30 +1,28 @@
-# Transparent egress (CCT-style)
+# Egress (transparent SNI intercept)
 
-Moves piso from "explicit proxy + CA everywhere" to a **transparent** model
-like the `claude-code-telegram` gateway: the worker's default route leads
-straight to the internet, the proxy is invisible, and only *ruled* hosts are
-intercepted for MITM/substitution.
+Worker TCP/443 never uses an explicit forward proxy. The vpc bridge NATs
+unruled traffic to the internet; the docker host DNATs **all** vpc TCP/443
+(except the vpc subnet itself) to the gateway container's vpc address `:8084`.
 
-## What changes (4 layers)
+The gateway sniffs TLS SNI:
 
-| Layer | Before | After |
-|---|---|---|
-| Worker network | `piso_vpc` is `internal: true`; egress only via the gateway's HTTP proxy env | `piso_vpc` NATs off the bridge: default route → internet directly |
-| Worker env | `HTTPS_PROXY`/`HTTP_PROXY` → gateway | No proxy env. `/piso-ca.pem` stays mounted (ruled hosts still MITM'd) |
-| Gateway | MITM everything on `:8080` (CONNECT) | `-transparent-listen :8084` (SNI-based): MITM ruled hosts, raw-splice unrouted |
-| Host NAT | — | `scripts/transparent-egress.sh`: DNAT ruled hosts' `:443` → `127.0.0.1:8084` |
+- **Ruled host** (a substitution rule, domain policy, or enabled exception
+  names it) → MITM, scan, substitute `piso_…` / block, log.
+- **Unruled host** → raw TCP splice. Real end-to-end TLS, no CA, no log.
 
-## How the pieces fit
+The worker API (`http://gateway:8083`) is vpc HTTP on a non-443 port, so
+informant / checkin / ports / context are never intercepted.
 
 ```
 worker (default route → internet via vpc bridge masquerade)
    │
-   ├─ unrouted hosts ─┴─> NAT'd by Docker bridge → real end-to-end TLS, no CA, no gateway
-   └─ ruled hosts  (github.com …)
-         └─> host DNAT :443 → 127.0.0.1:8084
-               └─> gateway transparent listener: sniff SNI
-                     ├─ ruled  → MITM + substitution (existing pipeline)
-                     └─ unrouted→ raw TCP splice (no CA either)
+   ├─ not :443 ──────────────────────► NAT'd by Docker bridge
+   ├─ :443 to vpc addresses ─────────► direct (worker API, DNS)
+   └─ :443 to the internet
+         └─> host DNAT → gateway:<vpc-ip>:8084
+               └─> sniff SNI
+                     ├─ ruled  → MITM + substitution
+                     └─ unruled→ raw TCP splice
 ```
 
 No `SO_ORIGINAL_DST` is needed: the gateway derives the host from the TLS
@@ -33,44 +31,38 @@ ClientHello's SNI and dials the origin itself.
 ## Deploy
 
 ```bash
-# 1. gateway code + compose + host DNAT (transparent-egress.sh runs
-#    automatically at the end of make install on iptables hosts)
-sudo make install
-# 2. workers now route directly; recreate them so the new env applies
-piso up
+sudo make install    # rebuilds gateway; host-nat runs on iptables hosts
+piso up              # recreate workers (no proxy env)
+sudo PISO_DATA=~/.piso ./scripts/transparent-egress.sh install
 ```
 
-Refresh ruled-host IPs whenever they change (github.com rotates):
-`sudo PISO_DATA=~/.piso ./scripts/transparent-egress.sh refresh` (put it on
-a cron or call it from `piso up`). Port customization: `piso up
---transparent-port N` (persisted to ports.json and picked up by the script).
+`scripts/transparent-egress.sh` looks up the gateway's vpc IP and the vpc
+bridge at install time. Re-run `install` after the gateway container is
+recreated (new vpc IP).
 
-## Verification
+## Verification (inside a worker)
 
 ```bash
-# in a worker: NO proxy env, NO --cacert needed for unrouted hosts
-curl -sS https://api.github.com/zen          # 200 (real cert, direct NAT)
-# ruled hosts still need the piso CA (they're MITM'd — that's the point)
-curl -sS --cacert /piso-ca.pem https://github.com/   # 200
-# gateway dashboard log: ruled requests present, unrouted absent
+# unruled: real origin cert, no gateway hop
+curl -sv https://example.com/ 2>&1 | grep issuer
+
+# ruled: piso CA (system store already trusts it)
+curl -sv https://<ruled-host>/ 2>&1 | grep issuer
+
+# worker API still direct
+curl -sS "$GATEWAY_URL/api/v1/worker/health"
 ```
 
 ## Tradeoffs
 
-- **Unruled traffic is not inspected, blocked, or logged** (same tradeoff as
-  CCT). The old "no real secret ever leaves a worker unseen" guarantee now
-  applies only to ruled hosts.
-- `internal: false` on `piso_vpc` means a compromised worker has a real
-  internet path by itself; rely on the worker's own hardening (cap_drop,
-  read-only rootfs) for containment.
-- DNAT interception is IPv4 + `:443` only (matches `enable_ipv6: false`).
-- Ruled-host IP lists go stale — run `refresh`.
+- Unruled traffic is not inspected, blocked, or logged.
+- Intercept is IPv4 TCP/443 only (`enable_ipv6: false`). HTTP/3 (QUIC),
+  :80, and raw TCP bypass.
+- Ruled hosts need the piso CA (baked into the worker trust store).
+- A `*` substitution rule MITMs every SNI. Keep `allowedHosts` tight.
 
 ## Rollback
 
 ```bash
 sudo ./scripts/transparent-egress.sh uninstall
-# in compose/gateway.yaml: set piso_vpc internal:true + masquerade:false,
-# remove PISO_TRANSPARENT_LISTEN; in worker.yaml.tmpl restore HTTPS_PROXY
-sudo make install && piso up
 ```

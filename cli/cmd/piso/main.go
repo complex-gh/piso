@@ -78,7 +78,7 @@ func usage() {
 	fmt.Print(`piso — isolate an AI agent in a Docker worker behind a MITM gateway
 
 Usage:
-  piso up [dir] [--proxy-port N] [--ctrl-port N] [--ingress-port N]
+  piso up [dir] [--ctrl-port N] [--ingress-port N]
                          ensure gateway + worker for [dir] (default: cwd)
   piso down              stop this project's worker (gateway stays up)
   piso attach [--shell] [--new] [--session <id|path>]
@@ -100,11 +100,10 @@ Usage:
                          rebuild the shared worker image once, and recreate every worker
                          (confirm before applying)
 
-Host ports default to 8080 (proxy) and 80 (single web port: dashboard at
-http://piso.local AND every route at http://<label>.piso.local, dispatched by
-Host — no port in any URL). 8082 remains as the legacy ingress alias.
-If a port is taken, piso up exits with the flag to override
-(--proxy-port, --ctrl-port, --ingress-port). Env: PISO_*_PORT.
+Host ports default to 80 (single web port: dashboard at http://piso.local AND
+every route at http://<label>.piso.local, dispatched by Host — no port in any
+URL). 8082 remains as the legacy ingress alias. If a port is taken, piso up
+exits with the flag to override (--ctrl-port, --ingress-port). Env: PISO_*_PORT.
 make install runs piso setup --rebuild so an existing install is replaced
 in place (binaries, share tree, gateway image, and state.json schema).
 `)
@@ -214,16 +213,14 @@ func cmdUp(args []string) error {
 	return nil
 }
 
-// parseUpArgs reads `piso up [dir] [--proxy-port N] [--ctrl-port N] [--ingress-port N]`.
+// parseUpArgs reads `piso up [dir] [--ctrl-port N] [--ingress-port N]`.
 // Port flags of 0 mean "keep saved / default".
 func parseUpArgs(args []string) (string, pisoconfig.HostPorts, error) {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var ports pisoconfig.HostPorts
-	fs.IntVar(&ports.Proxy, "proxy-port", 0, "host port for the egress proxy")
 	fs.IntVar(&ports.Control, "ctrl-port", 0, "host port for the dashboard / control API")
 	fs.IntVar(&ports.Ingress, "ingress-port", 0, "host port for name.piso.local ingress")
-	fs.IntVar(&ports.Transparent, "transparent-port", 0, "host port for the transparent REDIRECT listener")
 	if err := fs.Parse(args); err != nil {
 		return "", pisoconfig.HostPorts{}, err
 	}
@@ -235,7 +232,7 @@ func parseUpArgs(args []string) (string, pisoconfig.HostPorts, error) {
 }
 
 // registerWorkerWithGateway tells the gateway this worker's name/slug and its
-// vpc IPs, so the proxy can tag request logs with the slug. Best-effort: a
+// vpc IPs, so request logs can be tagged with the slug. Best-effort: a
 // failure here must never fail `piso up`.
 func registerWorkerWithGateway(proj pisoconfig.Project) error {
 	ips, err := dockernet.ContainerIPs(proj.WorkerName())
@@ -1376,12 +1373,10 @@ func dockerComposeEnv() (map[string]string, error) {
 	}
 	p := pisoconfig.LoadHostPorts()
 	return map[string]string{
-		"DOCKER_BUILDKIT":       "1",
-		"PISO_DATA":             data,
-		"PISO_PROXY_PORT":       fmt.Sprintf("%d", p.Proxy),
-		"PISO_CTRL_PORT":        fmt.Sprintf("%d", p.Control),
-		"PISO_INGRESS_PORT":     fmt.Sprintf("%d", p.Ingress),
-		"PISO_TRANSPARENT_PORT": fmt.Sprintf("%d", p.Transparent),
+		"DOCKER_BUILDKIT":   "1",
+		"PISO_DATA":         data,
+		"PISO_CTRL_PORT":    fmt.Sprintf("%d", p.Control),
+		"PISO_INGRESS_PORT": fmt.Sprintf("%d", p.Ingress),
 	}, nil
 }
 

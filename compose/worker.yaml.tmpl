@@ -2,7 +2,7 @@
 # PKG placeholders are substituted by the CLI; do not edit by hand.
 #
 # The worker joins piso_vpc only (external, created by the gateway compose).
-# That network is internal: the worker cannot be forwarded off the bridge.
+# TCP/443 on that bridge is DNATed to the gateway for SNI intercept.
 # Do not attach this service to piso_egress — that is the gateway's NAT path.
 name: piso-PROJ-SLUG
 
@@ -30,12 +30,9 @@ services:
       - CA_DIR/pi-profile/settings.json:/root/.pi/agent/settings.json:ro
       - CA_DIR/pi-profile/models.json:/root/.pi/agent/models.json:ro
     environment:
-      # Transparent egress (CCT-style): the vpc bridge NATs unrouted hosts
-      # directly, and the host DNATs RULED hosts (:443) into the gateway's
-      # transparent listener for MITM/substitution. No HTTP(S)_PROXY needed —
-      # the worker's default route now leads straight to the internet.
+      # Egress is transparent: the vpc default route NATs off the bridge;
+      # host iptables DNATs TCP/443 to gateway:8084 (SNI MITM or splice).
       # Keep /piso-ca.pem mounted so MITM'd (ruled) hosts still verify.
-      NO_PROXY: gateway,localhost,127.0.0.1,*.piso.local
       GATEWAY_URL: http://gateway:8083
       PISO_WORKER_NAME: piso-worker-PROJ-SLUG
       PISO_WORKER_SLUG: PROJ-SLUG
