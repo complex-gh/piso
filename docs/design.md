@@ -55,6 +55,7 @@ Blocked requests return **407** to the worker with only `X-Piso-Request-Id` + `X
 
 ## Secrets policy
 
+- MCP OAuth is gateway-brokered: the worker announces a URL via `POST /api/v1/worker/mcp`, gets a `piso_mcp_…` placeholder, and writes `mcp.json` with `auth: "bearer"`. Real tokens never enter the worker. The host completes login on the dashboard (callback `mcp-oauth.piso.local`); substitution and capture-replay are the same as other secrets. A connect before login is 407 `mcp-auth-required`.
 - Only `piso_...` placeholders ever exist in the worker.
 - Real values live in `~/.piso/state.json` (host-mounted into the gateway only, mode 0700 dir / 0600 file) and in gateway memory. Override with `PISO_DATA`.
 - Substitution happens at the last hop, inside the gateway, before upstream TLS.
