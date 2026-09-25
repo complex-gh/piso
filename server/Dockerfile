@@ -16,7 +16,10 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY --chown=app:app entrypoint.sh /entrypoint.sh
 COPY --chown=app:app app /app
-RUN chmod +x /entrypoint.sh
+# WORKDIR /app is root-owned; collectstatic must be able to mkdir staticfiles.
+RUN chmod +x /entrypoint.sh \
+    && mkdir -p /app/staticfiles \
+    && chown -R app:app /app /entrypoint.sh
 
 USER app
 EXPOSE 8000

@@ -1,16 +1,20 @@
 import hashlib
+import os
 import time
 
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.test import TestCase
 
+import base64
+import uuid
+
 from core.crypto import canonical_auth_message, verify_ed25519
 from core.gateway_auth import verify_bound_auth
-from core.envelope import open_envelope, seal_payload, wrap_dek
-from core.models import Account, AccountMembership, PairingRequest, Principal, PrincipalKey
+from core.models import Account, AccountMembership, Gateway, PairingRequest, Principal, PrincipalKey
+from core.models.access import Resource
 from core.models.events import PairingStatus
-from core.models.identity import KeyPurpose, MembershipRole, PrincipalKind
+from core.models.identity import KeyPurpose, MembershipRole, PrincipalKind, PrincipalStatus
 from nacl.signing import SigningKey
 
 
@@ -112,14 +116,75 @@ class CryptoTests(TestCase):
         self.assertTrue(verify_bound_auth(pub, ts, nonce, sig, "GET", path, body))
         self.assertFalse(verify_bound_auth(pub, ts, nonce, sig, "GET", path, body))
 
-    def test_envelope_roundtrip(self):
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-        from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption, PublicFormat
 
-        priv = X25519PrivateKey.generate()
-        pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-        priv_raw = priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-        dek, nonce, ct = seal_payload(b"hello-secret")
-        wrap = wrap_dek(pub, dek)
-        got = open_envelope(priv_raw, wrap, nonce, ct)
-        self.assertEqual(got, b"hello-secret")
+class GrantTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", password="secret", is_staff=True)
+        self.account = Account.objects.create(name="Alice")
+        AccountMembership.objects.create(
+            account=self.account, user=self.user, role=MembershipRole.OWNER
+        )
+        self.gw = Principal.objects.create(
+            account=self.account,
+            kind=PrincipalKind.GATEWAY,
+            nostr_pubkey="ab" * 32,
+            name="Virginia",
+            status=PrincipalStatus.ACTIVE,
+        )
+        PrincipalKey.objects.create(
+            principal=self.gw, purpose=KeyPurpose.ENCRYPTION, public_key="cd" * 32
+        )
+        Gateway.objects.create(principal=self.gw, machine_name="Virginia")
+        self.client.force_login(self.user)
+
+    def test_anonymous_pair_redirects_to_login(self):
+        self.client.logout()
+        pid = uuid.uuid4()
+        res = self.client.get(f"/pair/{pid}/")
+        self.assertEqual(res.status_code, 302)
+        self.assertIn("/login/", res["Location"])
+        self.assertIn("next=", res["Location"])
+
+    def test_reject_plaintext_secret(self):
+        res = self.client.post(
+            "/api/v1/secrets",
+            data={"name": "x", "value": "secret", "wraps": []},
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_create_secret_stores_ciphertext_only(self):
+        wrap = base64.b64encode(b"\x01" + b"\x00" * 92).decode()
+        nonce = base64.b64encode(os.urandom(12)).decode()
+        ct = base64.b64encode(os.urandom(32)).decode()
+        res = self.client.post(
+            "/api/v1/secrets",
+            data={
+                "name": "Anthropic",
+                "algorithm": "chacha20poly1305-v1",
+                "nonce": nonce,
+                "ciphertext": ct,
+                "content_hash": "00",
+                "metadata": {"placeholder": "piso_x"},
+                "wraps": [
+                    {"principal_id": str(self.gw.id), "wrapped_data_key": wrap}
+                ],
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 201, res.content)
+        listed = self.client.get("/api/v1/secrets")
+        self.assertEqual(listed.status_code, 200)
+        body = listed.json()
+        self.assertEqual(len(body["secrets"]), 1)
+        self.assertNotIn("ciphertext", body["secrets"][0])
+        self.assertNotIn("value", body["secrets"][0])
+        self.assertTrue(Resource.objects.filter(name="Anthropic").exists())
+
+    def test_list_gateways(self):
+        res = self.client.get("/api/v1/gateways")
+        self.assertEqual(res.status_code, 200)
+        rows = res.json()["gateways"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["encryption_pubkey"], "cd" * 32)

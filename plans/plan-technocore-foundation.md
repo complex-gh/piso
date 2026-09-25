@@ -21,12 +21,9 @@ Work in `internal/technocore` (Go) and `server/app/core/envelope.py` (Python) mu
 
 ## Remaining on this layer
 
-- Cross-language golden vector (Python seal/wrap → Go open) checked in `testdata/`
-- Grant API: authenticated client wraps DEKs for a gateway’s encryption pubkey and POSTs ciphertext + envelopes
-- `envelopes_changed` group_send when grants are written
-- Dashboard chip: unpaired / pending / connected / last sync
+- See `plans/plan-technocore-enroll-share.md` for enrollment QR and secret sharing (in progress in tree).
 - `Principal.nostr_pubkey` is still Ed25519 device id (rename when Nostr events exist)
-- `make install` must copy `internal/` (shared technocore package) into the share tree
+- `make install` must copy `internal/` into the share tree
 
 ## After grants work
 

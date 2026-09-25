@@ -1,46 +1,63 @@
 # Technocore coordinator
 
-Django 5.2 LTS + Channels/Daphne service for identity, fleet, encrypted blobs,
-events, and WebSockets from gateways and web clients. Real secrets never
-land here; gateways decrypt envelopes locally.
+Django 5.2 LTS + Channels/Daphne. Identity, fleet, encrypted blobs, events,
+and WebSockets from gateways and web clients. **Real secrets never land here.**
+Gateways wrap and unwrap locally (`chacha20poly1305-v1`).
 
-## Compose (EC2)
+## Compose (deployed host)
+
+Caddy owns host **80/443**. Do not run this on a machine that also binds
+`piso.local` on port 80.
 
 ```bash
 cp .env.example .env
 # set DOMAIN, ACME_EMAIL, DJANGO_SECRET_KEY, POSTGRES_PASSWORD, ALLOWED_HOSTS
 docker compose up --build -d
+docker compose exec server python manage.py createsuperuser
 ```
 
-Caddy terminates TLS on 80/443 and proxies to Daphne. Postgres and Redis
-are not published. The `worker` process consumes the `technocore` channel.
+Staff: `https://$DOMAIN/setup/` or `/admin/` for Account + membership.
+Then `https://$DOMAIN/login/` on the phone.
 
-Sockets:
+Postgres and Redis are not published.
 
-- `wss://$DOMAIN/ws/gateway/` — gateway auth (ed25519) then `ready` / envelope notices
-- `wss://$DOMAIN/ws/client/` — logged-in browser
-- `https://$DOMAIN/health/`
-- `https://$DOMAIN/login/` and `/pair/<id>/` — phone approves a gateway
-- `https://$DOMAIN/admin/`
-- `POST /api/v1/pairing-requests` — device starts pairing
-- `GET /api/v1/pairing-requests/<id>?token=` — device polls
-- `GET /api/v1/sync/secrets` — signed gateway pull of ciphertext + envelopes
+## Enrollment
 
-On the machine running piso:
+On a machine running piso (laptop gateway):
 
 ```bash
-piso gateway launch --server https://$DOMAIN --name "Virginia"
-# open the printed /pair/<id>/ URL while logged in, Approve
-piso gateway status
+piso up
+piso gateway launch --server https://$DOMAIN --name laptop
 ```
 
-The local gateway process polls identity + envelopes from `~/.piso/technocore/identity.json` (the `PISO_DATA` mount). Local `piso up` still works unpaired.
+Scan the terminal QR (URL is `https://$DOMAIN/pair/<id>/` only). Compare the
+fingerprint, then Approve.
 
-## Layout
+Poll uses header `X-Piso-Poll-Token`, not a query string.
 
-- `identity` — accounts, Nostr principals, memberships
-- `fleet` — gateways, workers, projects, infra inventory
-- `access` — resources, grants, ciphertext, key envelopes
-- `work` — directives, plans, tasks, approvals, human actions
-- `knowledge` — booster metadata, curator proposals, Hammerspace notes
-- `events` — pairing requests and the append-only event log
+## Share a secret
+
+The local gateway wraps plaintext and POSTs ciphertext:
+
+```bash
+piso secrets add mykey piso_mykey 'sk-...' api.example.com
+piso secrets publish piso_mykey
+# or:
+printf '%s' 'sk-...' | piso secrets share --name mykey --placeholder piso_mykey --hosts api.example.com
+```
+
+`GET /api/v1/secrets` returns metadata only. `GET /api/v1/sync/secrets` is
+gateway-authenticated and returns ciphertext + wraps for that principal.
+
+## HTTP
+
+- `wss://$DOMAIN/ws/gateway/` — bound Ed25519 auth, then `ready` / `envelopes_changed`
+- `wss://$DOMAIN/ws/client/` — logged-in browser
+- `https://$DOMAIN/health/`
+- `https://$DOMAIN/login/` `?next=/pair/<id>/`
+- `https://$DOMAIN/setup/` — first account (staff)
+- `POST /api/v1/pairing-requests`
+- `GET /api/v1/pairing-requests/<id>` + `X-Piso-Poll-Token`
+- `GET /api/v1/gateways`
+- `POST /api/v1/secrets` — ciphertext + wrap blobs only
+- `GET /api/v1/sync/secrets`

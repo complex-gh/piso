@@ -5,7 +5,18 @@
   <h1>technocore</h1>
   {% if user.is_authenticated %}
     <p>Signed in as {{ user.username }}. <a href="/logout/">Log out</a></p>
-    <p>Scan a gateway QR or open a <code>/pair/<id>/</code> link to approve a machine.</p>
+    {% if not accounts %}
+      <p>No account yet. Staff can <a href="/setup/">create the first account</a>.</p>
+    {% endif %}
+    <p>Scan a gateway QR or open a pairing link. Compare fingerprints before approving.</p>
+    {% if pending %}
+      <h2>Pending pairing</h2>
+      <ul>
+        {% for p in pending %}
+          <li><a href="/pair/{{ p.id }}/">{{ p.name|default:p.fingerprint }}</a> — {{ p.fingerprint }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
   {% else %}
     <p><a href="/login/">Log in</a> to approve gateway pairing requests.</p>
   {% endif %}

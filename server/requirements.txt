@@ -3,7 +3,6 @@ channels==4.3.2
 channels-redis==4.3.0
 daphne==4.2.3
 psycopg[binary]==3.3.6
-redis==8.1.0
+redis==5.2.1
 whitenoise==6.12.0
 PyNaCl==1.6.2
-cryptography==50.0.1

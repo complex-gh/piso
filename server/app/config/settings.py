@@ -12,8 +12,16 @@ ALLOWED_HOSTS = [
 ]
 if "127.0.0.1" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append("127.0.0.1")
-_domain = os.environ.get("DOMAIN", "").strip()
-CSRF_TRUSTED_ORIGINS = [f"https://{_domain}"] if _domain else []
+_csrf = [
+    o.strip()
+    for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if o.strip()
+]
+if not _csrf:
+    _domain = os.environ.get("DOMAIN", "").strip()
+    if _domain:
+        _csrf = [f"https://{_domain}"]
+CSRF_TRUSTED_ORIGINS = _csrf
 
 INSTALLED_APPS = [
     "daphne",
