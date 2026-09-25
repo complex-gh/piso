@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>technocore</title></head>
+<body>
+  <h1>technocore</h1>
+  {% if user.is_authenticated %}
+    <p>Signed in as {{ user.username }}. <a href="/logout/">Log out</a></p>
+    <p>Scan a gateway QR or open a <code>/pair/<id>/</code> link to approve a machine.</p>
+  {% else %}
+    <p><a href="/login/">Log in</a> to approve gateway pairing requests.</p>
+  {% endif %}
+</body>
+</html>

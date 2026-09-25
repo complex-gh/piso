@@ -1,6 +1,5 @@
 import uuid
 
-from django.contrib.postgres.fields import ArrayField
 from django.db import models
 
 from .identity import Account, Principal
@@ -54,7 +53,7 @@ class Grant(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     resource = models.ForeignKey(Resource, on_delete=models.CASCADE, related_name="grants")
     principal = models.ForeignKey(Principal, on_delete=models.CASCADE, related_name="grants")
-    actions = ArrayField(models.CharField(max_length=32), default=list, blank=True)
+    actions = models.JSONField(default=list, blank=True)
     effect = models.CharField(max_length=8, choices=GrantEffect.choices, default=GrantEffect.ALLOW)
     constraints = models.JSONField(default=dict, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)

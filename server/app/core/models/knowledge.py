@@ -1,6 +1,5 @@
 import uuid
 
-from django.contrib.postgres.fields import ArrayField
 from django.db import models
 
 from .access import Resource
@@ -63,7 +62,7 @@ class MemoryNote(models.Model):
     author = models.ForeignKey(Principal, on_delete=models.CASCADE, related_name="memory_notes")
     title = models.CharField(max_length=300, blank=True)
     body = models.TextField()
-    tags = ArrayField(models.CharField(max_length=64), default=list, blank=True)
+    tags = models.JSONField(default=list, blank=True)
     provenance = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

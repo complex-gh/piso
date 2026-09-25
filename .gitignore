@@ -22,3 +22,4 @@ dist/
 # Python (technocore coordinator)
 server/.venv/
 **/__pycache__/
+*.sqlite3

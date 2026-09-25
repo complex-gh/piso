@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Pair gateway</title></head>
+<body>
+  <h1>Pair gateway</h1>
+  <p>Name: {{ pairing.name|default:"(unnamed)" }}</p>
+  <p>Compare this fingerprint with the terminal:</p>
+  <p><code>{{ pairing.fingerprint }}</code></p>
+  <p>Status: <strong>{{ pairing.status }}</strong></p>
+  {% if error %}<p>{{ error }}</p>{% endif %}
+  {% if pairing.status == "pending" %}
+    {% if accounts %}
+      <form method="post">
+        {% csrf_token %}
+        {% if accounts|length > 1 %}
+          <p>Account:
+            <select name="account">
+              {% for a in accounts %}
+                <option value="{{ a.id }}">{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </p>
+        {% else %}
+          <p>Approving as <strong>{{ accounts.0.name }}</strong></p>
+        {% endif %}
+        <button name="action" value="approve">Approve</button>
+        <button name="action" value="reject">Reject</button>
+      </form>
+    {% else %}
+      <p>No owner/admin account membership on this login. Create an Account in admin first.</p>
+    {% endif %}
+  {% endif %}
+  <p><a href="/">Home</a></p>
+</body>
+</html>

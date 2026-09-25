@@ -30,9 +30,18 @@ class PairingRequest(models.Model):
     )
     kind = models.CharField(max_length=16, choices=PairingKind.choices)
     device_pubkey = models.CharField(max_length=128)
+    encryption_pubkey = models.CharField(max_length=64, blank=True)
     name = models.CharField(max_length=200, blank=True)
     fingerprint = models.CharField(max_length=64, blank=True)
     capabilities = models.JSONField(default=list, blank=True)
+    poll_token = models.CharField(max_length=64, blank=True)
+    principal = models.ForeignKey(
+        Principal,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="pairing_requests",
+    )
     status = models.CharField(
         max_length=16, choices=PairingStatus.choices, default=PairingStatus.PENDING
     )
