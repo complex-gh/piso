@@ -18,3 +18,7 @@ dist/
 # worker-local build/cache dirs (not part of the repo)
 .gobuild/
 .home/
+
+# Python (technocore coordinator)
+server/.venv/
+**/__pycache__/

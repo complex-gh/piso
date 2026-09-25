@@ -1,0 +1,7 @@
+Django==5.2.17
+channels==4.3.2
+channels-redis==4.3.0
+daphne==4.2.3
+psycopg[binary]==3.3.6
+redis==8.1.0
+whitenoise==6.12.0
