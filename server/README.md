@@ -4,6 +4,9 @@ Django 5.2 LTS + Channels/Daphne. Identity, fleet, encrypted blobs, events,
 and WebSockets from gateways and web clients. **Real secrets never land here.**
 Gateways wrap and unwrap locally (`chacha20poly1305-v1`).
 
+Two-machine enrollment (DNS, `.env`, QR, `piso gateway launch`):
+[docs/technocore-setup.md](../docs/technocore-setup.md).
+
 ## Compose (deployed host)
 
 Caddy owns host **80/443**. Do not run this on a machine that also binds
